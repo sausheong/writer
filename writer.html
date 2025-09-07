@@ -1,0 +1,1145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Writer</title>
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
+    <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        .tab-active {
+            background-color: #93b9f5;
+            color: white;
+        }
+        /* Dirty (unsaved) tab visual */
+        .tab-dirty {
+            background-color: #fde68a; /* amber-200 */
+            color: #78350f; /* amber-900 */
+        }
+        /* Simple context menu styling */
+        #context-menu {
+            position: absolute;
+            background: white;
+            border: 1px solid #e5e7eb; /* gray-200 */
+            box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+            border-radius: 0.25rem;
+            z-index: 1000;
+            width: 160px;
+        }
+        #context-menu.hidden { display: none; }
+        #context-menu .item { padding: 8px 12px; cursor: pointer; }
+        #context-menu .item:hover { background: #f3f4f6; }
+
+        /* Basic markdown preview typography without relying on plugins */
+        #preview { line-height: 1.7; }
+        #preview h1 { font-size: 2rem; font-weight: 700; margin: 1.25em 0 0.6em; }
+        #preview h2 { font-size: 1.75rem; font-weight: 700; margin: 1.2em 0 0.55em; }
+        #preview h3 { font-size: 1.5rem; font-weight: 600; margin: 1.1em 0 0.5em; }
+        #preview h4 { font-size: 1.25rem; font-weight: 600; margin: 1em 0 0.5em; }
+        #preview h5 { font-size: 1.125rem; font-weight: 600; margin: 0.9em 0 0.5em; }
+        #preview h6 { font-size: 1rem; font-weight: 600; margin: 0.8em 0 0.5em; text-transform: uppercase; letter-spacing: .02em; }
+        #preview p, #preview ul, #preview ol { margin: 0.75em 0; }
+        #preview ul { list-style: disc; padding-left: 1.5rem; }
+        #preview ol { list-style: decimal; padding-left: 1.5rem; }
+        #preview code { background: #f3f4f6; padding: 0.15em 0.35em; border-radius: 0.25rem; }
+        #preview pre { background: #0f172a; color: #e2e8f0; padding: 1rem; border-radius: 0.5rem; overflow: auto; }
+        #preview pre code { background: transparent; padding: 0; }
+    </style>
+</head>
+<body class="flex flex-col h-screen m-0 font-sans bg-gray-50 text-gray-800" style="font-family: 'Open Sans', sans-serif;">
+    <div class="bg-gray-100 p-4 flex justify-between items-center">
+        <div>
+            <h3 class="text-lg font-semibold mb-2">Writer</h3>
+            <div role="tablist" class="tabs tabs-lift tabs-sm" id="open-files">
+                <!-- Open files will be listed here as tabs -->
+            </div>
+        </div>
+        <div class="flex space-x-2 items-center">
+            <button onclick="toggleLeft()" class="btn btn-circle">⟪⟪</button>
+            <button onclick="toggleRight()" class="btn btn-circle">✦</button>
+            <button onclick="popoutPreview()" class="btn btn-circle">→</button>
+            <button class="btn btn-circle text-2xl" onclick="toggleAiSettings()">⚙︎</button>
+        </div>
+    </div>
+    <div class="flex flex-1 overflow-hidden">
+        <div class="w-1/5 bg-gray-100 p-4 overflow-y-auto" id="left-panel">
+            <div class="flex items-center gap-2 mb-4">
+                <button type="button" onclick="addFolder()" class="btn btn-sm btn-accent">add</button>
+                <button type="button" onclick="newFile()" class="btn btn-sm btn-primary">new</button>
+            </div>
+            <h4 class="text-md font-semibold">Files</h4>
+            <ul class="list-none p-0">
+                <!-- Tree will be rendered here by JS -->
+            </ul>
+        </div>
+        <div class="flex-1 p-4 relative">
+            <textarea id="editor" placeholder="Select a file to edit..." class="w-full h-full border-none resize-none bg-white p-4 rounded shadow-sm"></textarea>
+            <img id="image-viewer" class="w-full h-full object-contain hidden absolute inset-0" />
+            <iframe id="pdf-viewer" class="w-full h-full hidden absolute inset-0"></iframe>
+        </div>
+        <div class="w-1/3 bg-gray-50 p-0 flex flex-col" id="preview-panel">
+            <!-- Keep hidden preview to avoid breaking existing code paths -->
+            <div id="preview" class="hidden"></div>
+
+            <!-- AI Agent Panel -->
+            <div class="flex-1 overflow-y-auto p-3" id="ai-messages" aria-live="polite"></div>
+            <div class="border-t border-gray-200 p-2 space-y-2">
+                <div class="flex items-center justify-between">
+                    <span class="text-sm text-gray-600">Agent</span>
+                </div>
+                
+                <div class="flex gap-2 items-start">
+                    <textarea id="ai-input" placeholder="Ask the AI to modify the current file..." class="textarea textarea-bordered textarea-sm w-full" rows="3"></textarea>
+                    <button class="btn btn-ghost btn-sm" onclick="aiSend()">►</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- Context Menu -->
+    <div id="context-menu" class="hidden">
+        <div id="cm-new-file" class="item" onclick="newFileInContextDir()">New File</div>
+        <div id="cm-new-folder" class="item" onclick="newFolderInContextDir()">New Folder</div>
+        <div class="item" onclick="renameSelected()">Rename</div>
+        <div class="item" onclick="deleteSelected()">Delete</div>
+    </div>
+    <div class="bg-gray-100 p-4 flex justify-between items-center">
+        <span id="word-count" class="text-sm">Word count: 0</span>
+        <div class="flex space-x-2">
+            <button id="save-btn" onclick="saveFile()" class="btn btn-sm  btn-success hidden">Save</button>
+            <button id="download-btn" onclick="downloadFile()" class="btn btn-sm btn-info hidden">download</button>
+        </div>
+    </div>
+    <script>
+        let currentFile = '';
+        let opfsRoot;
+        let currentBlobUrl = null; // track last created object URL to revoke
+        const MAX_PREVIEW_BYTES = 500000; // ~500KB limit for preview to keep it responsive
+        let previewWin = null; // external preview window reference
+        const OPENAI_ENDPOINT = 'https://api.openai.com/v1/responses';
+        // Track per-file state (dirty, lastSaved, and in-memory buffer)
+        const fileState = {}; // { [filename]: { dirty: boolean, lastSaved: string, buffer: string } }
+
+        // Simple debounce utility to reduce heavy work on fast events
+        function debounce(fn, delay) {
+            let t;
+            return (...args) => {
+                clearTimeout(t);
+                t = setTimeout(() => fn(...args), delay);
+            };
+        }
+
+        async function initOPFS() {
+            if ('storage' in navigator && 'getDirectory' in navigator.storage) {
+                opfsRoot = await navigator.storage.getDirectory();
+                await buildTreeFromOPFS();
+                // Load persisted settings into UI controls
+                await loadSettingsIntoUI();
+            } else {
+                alert('OPFS not supported');
+            }
+        }
+
+        async function getFileHandle(path) {
+            const parts = path.split('/');
+            let dir = opfsRoot;
+            for (let i = 0; i < parts.length - 1; i++) {
+                dir = await dir.getDirectoryHandle(parts[i]);
+            }
+            return await dir.getFileHandle(parts[parts.length - 1]);
+        }
+
+        initOPFS();
+
+        async function loadFile(filename) {
+            try {
+                // Snapshot the current editor buffer before switching files
+                if (currentFile) {
+                    const prev = fileState[currentFile] || (fileState[currentFile] = { dirty: false, lastSaved: '', buffer: '' });
+                    // Only snapshot for text editor-visible files
+                    if (!document.getElementById('editor').classList.contains('hidden')) {
+                        prev.buffer = document.getElementById('editor').value;
+                    }
+                }
+                const fileHandle = await getFileHandle(filename);
+                const file = await fileHandle.getFile();
+                const ext = filename.substring(filename.lastIndexOf('.')).toLowerCase();
+                const imageExts = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'];
+                const pdfExts = ['.pdf'];
+                currentFile = filename;
+                if (imageExts.includes(ext)) {
+                    if (currentBlobUrl) { URL.revokeObjectURL(currentBlobUrl); currentBlobUrl = null; }
+                    document.getElementById('editor').classList.add('hidden');
+                    document.getElementById('pdf-viewer').classList.add('hidden');
+                    document.getElementById('save-btn').classList.add('hidden');
+                    const img = document.getElementById('image-viewer');
+                    currentBlobUrl = URL.createObjectURL(file);
+                    img.src = currentBlobUrl;
+                    img.classList.remove('hidden');
+                    document.getElementById('download-btn').classList.remove('hidden');
+                } else if (pdfExts.includes(ext)) {
+                    if (currentBlobUrl) { URL.revokeObjectURL(currentBlobUrl); currentBlobUrl = null; }
+                    document.getElementById('editor').classList.add('hidden');
+                    document.getElementById('image-viewer').classList.add('hidden');
+                    document.getElementById('save-btn').classList.add('hidden');
+                    const iframe = document.getElementById('pdf-viewer');
+                    currentBlobUrl = URL.createObjectURL(file);
+                    iframe.src = currentBlobUrl;
+                    iframe.classList.remove('hidden');
+                    document.getElementById('download-btn').classList.remove('hidden');
+                } else {
+                    if (currentBlobUrl) { URL.revokeObjectURL(currentBlobUrl); currentBlobUrl = null; }
+                    document.getElementById('image-viewer').classList.add('hidden');
+                    document.getElementById('pdf-viewer').classList.add('hidden');
+                    // Use in-memory buffer if we have unsaved edits; otherwise read from OPFS
+                    const st = fileState[filename];
+                    let content;
+                    if (st && st.dirty && typeof st.buffer === 'string') {
+                        content = st.buffer;
+                    } else {
+                        content = await file.text();
+                    }
+                    document.getElementById('editor').value = content;
+                    document.getElementById('editor').classList.remove('hidden');
+                    document.getElementById('save-btn').classList.remove('hidden');
+                    document.getElementById('download-btn').classList.remove('hidden');
+                    // initialize or refresh file state
+                    const existing = fileState[filename] || {};
+                    fileState[filename] = {
+                        dirty: !!existing.dirty && content === (existing.buffer ?? content) ? true : (existing.dirty || false),
+                        lastSaved: existing.lastSaved ?? content,
+                        buffer: content
+                    };
+                }
+                debouncedUpdate();
+                addToOpenFiles(filename);
+                highlightActiveTab(filename);
+                updateTabVisual(filename);
+            } catch (err) {
+                console.error('Error loading file:', err);
+            }
+        }
+
+        function updateWordCount() {
+            if (!document.getElementById('editor').classList.contains('hidden')) {
+                const text = document.getElementById('editor').value;
+                const words = text.trim().split(/\s+/).filter(word => word.length > 0);
+                document.getElementById('word-count').textContent = 'Word count: ' + words.length;
+            } else {
+                document.getElementById('word-count').textContent = 'Word count: N/A';
+            }
+        }
+
+        function updatePreview() {
+            if (!document.getElementById('editor').classList.contains('hidden') && currentFile) {
+                const content = document.getElementById('editor').value;
+                if (currentFile.endsWith('.md')) {
+                    let toRender = content;
+                    if (toRender.length > MAX_PREVIEW_BYTES) {
+                        toRender = toRender.slice(0, MAX_PREVIEW_BYTES);
+                        const html = `<div class=\"text-sm text-gray-500\">Preview truncated for performance.</div>` + marked.parse(toRender);
+                        document.getElementById('preview').innerHTML = html;
+                        renderPreviewToWindow(html);
+                    } else {
+                        const html = marked.parse(toRender);
+                        document.getElementById('preview').innerHTML = html;
+                        renderPreviewToWindow(html);
+                    }
+                } else {
+                    let toRender = content;
+                    let truncatedNotice = '';
+                    if (toRender.length > MAX_PREVIEW_BYTES) {
+                        toRender = toRender.slice(0, MAX_PREVIEW_BYTES);
+                        truncatedNotice = '<div class="text-sm text-gray-500">Preview truncated for performance.</div>';
+                    }
+                    const html = truncatedNotice + '<pre>' + toRender.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</pre>';
+                    document.getElementById('preview').innerHTML = html;
+                    renderPreviewToWindow(html);
+                }
+            } else {
+                const prev = document.getElementById('preview');
+                if (prev) prev.innerHTML = '';
+                renderPreviewToWindow('');
+            }
+        }
+
+        function popoutPreview() {
+            try {
+                if (previewWin && !previewWin.closed) {
+                    previewWin.focus();
+                    return;
+                }
+                previewWin = window.open('', 'writerPreview', 'width=900,height=800');
+                if (!previewWin) return;
+                const doc = previewWin.document;
+                doc.open();
+                doc.write(`<!DOCTYPE html>
+<html>
+<head>
+<meta charset=\"utf-8\" />
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+<title>Preview</title>
+<link href=\"https://fonts.googleapis.com/css2?family=EB+Garamond:wght@400;700&display=swap\" rel=\"stylesheet\" />
+<style>
+  body { font-family: Garamond, 'EB Garamond', Georgia, serif; font-size: 24px; margin: 0; padding: 1.25rem; background: #f8fafc; color: #0f172a; }
+  .container { max-width: 900px; margin: 0 auto; }
+  /* Mirror preview styles */
+  .container { line-height: 1.7; }
+  .container h1 { font-size: 2rem; font-weight: 700; margin: 1.25em 0 0.6em; }
+  .container h2 { font-size: 1.75rem; font-weight: 700; margin: 1.2em 0 0.55em; }
+  .container h3 { font-size: 1.5rem; font-weight: 600; margin: 1.1em 0 0.5em; }
+  .container h4 { font-size: 1.25rem; font-weight: 600; margin: 1em 0 0.5em; }
+  .container h5 { font-size: 1.125rem; font-weight: 600; margin: 0.9em 0 0.5em; }
+  .container h6 { font-size: 1rem; font-weight: 600; margin: 0.8em 0 0.5em; text-transform: uppercase; letter-spacing: .02em; }
+  .container p, .container ul, .container ol { margin: 0.75em 0; }
+  .container ul { list-style: disc; padding-left: 1.5rem; }
+  .container ol { list-style: decimal; padding-left: 1.5rem; }
+  .container code { background: #f3f4f6; padding: 0.15em 0.35em; border-radius: 0.25rem; }
+  .container pre { background: #0f172a; color: #e2e8f0; padding: 1rem; border-radius: 0.5rem; overflow: auto; }
+  .container pre code { background: transparent; padding: 0; }
+</style>
+</head>
+<body><div class=\"container\" id=\"ext-preview\"></div></body>
+</html>`);
+                doc.close();
+                // Push current preview content immediately
+                renderPreviewToWindow(document.getElementById('preview').innerHTML);
+                // When external window closes, clear reference
+                previewWin.addEventListener('beforeunload', () => { previewWin = null; });
+            } catch (e) {
+                console.error('Failed to open preview window', e);
+            }
+        }
+
+        function renderPreviewToWindow(html) {
+            if (!previewWin || previewWin.closed) return;
+            try {
+                const target = previewWin.document.getElementById('ext-preview');
+                if (target) target.innerHTML = html || '';
+            } catch (e) {
+                // In case of cross-origin issues or closed window
+                previewWin = null;
+            }
+        }
+
+        // ===== AI Panel Helpers =====
+        async function toggleAiSettings() {
+            // Open DaisyUI modal and sync values
+            const modal = document.getElementById('settings-modal');
+            if (!modal) return;
+            // Prefill from settings.json
+            const s = await readSettings();
+            const modalModel = document.getElementById('ai-model-modal');
+            const modalAuto = document.getElementById('ai-auto-apply-modal');
+            const modalStream = document.getElementById('ai-stream-modal');
+            if (modalModel && s.model) modalModel.value = s.model;
+            if (modalAuto && typeof s.autoApply === 'boolean') modalAuto.checked = s.autoApply;
+            // Load API key from OPFS
+            const modalKey = document.getElementById('ai-api-key-modal');
+            if (modalKey) {
+                try {
+                    modalKey.value = s.apiKey || '';
+                    if (modalStream && typeof s.stream === 'boolean') modalStream.checked = s.stream;
+                } catch {}
+            }
+            if (modal.showModal) modal.showModal();
+        }
+
+        async function saveAiSettings() {
+            const modal = document.getElementById('settings-modal');
+            const modalModel = document.getElementById('ai-model-modal');
+            const modalAuto = document.getElementById('ai-auto-apply-modal');
+            const modalKey = document.getElementById('ai-api-key-modal');
+            const modalStream = document.getElementById('ai-stream-modal');
+            const modelSel = document.getElementById('ai-model');
+            const autoChk = document.getElementById('ai-auto-apply');
+            if (modelSel && modalModel) modelSel.value = modalModel.value;
+            if (autoChk && modalAuto) autoChk.checked = modalAuto.checked;
+            try {
+                const s = await readSettings();
+                const updated = {
+                    ...s,
+                    apiKey: (modalKey?.value || '').trim(),
+                    model: modalModel ? modalModel.value : (s.model || ''),
+                    autoApply: modalAuto ? !!modalAuto.checked : (typeof s.autoApply === 'boolean' ? s.autoApply : true),
+                    stream: modalStream ? !!modalStream.checked : (typeof s.stream === 'boolean' ? s.stream : true)
+                };
+                await writeSettings(updated);
+            } catch {}
+            if (modal && modal.close) modal.close();
+        }
+
+        async function readOpfsFileText(filename) {
+            try {
+                const fh = await opfsRoot.getFileHandle(filename);
+                const f = await fh.getFile();
+                return (await f.text()).trim();
+            } catch { return ''; }
+        }
+
+        async function writeOpfsFileText(filename, text) {
+            const fh = await opfsRoot.getFileHandle(filename, { create: true });
+            const w = await fh.createWritable();
+            await w.write(text);
+            await w.close();
+        }
+
+        // ===== settings.json helpers =====
+        async function readSettings() {
+            try {
+                const txt = await readOpfsFileText('settings.json');
+                if (!txt) return {};
+                return JSON.parse(txt);
+            } catch { return {}; }
+        }
+
+        async function writeSettings(settings) {
+            const json = JSON.stringify(settings || {}, null, 2);
+            await writeOpfsFileText('settings.json', json);
+        }
+
+        async function getApiKey() {
+            const s = await readSettings();
+            return s.apiKey || '';
+        }
+
+        async function loadSettingsIntoUI() {
+            // UI is driven by Settings modal only; nothing to preload here.
+            await readSettings(); // retain for side-effects if needed later
+        }
+
+        // promptForApiKey is deprecated; use Settings modal instead
+
+        function toast(msg) {
+            const box = document.createElement('div');
+            box.className = 'fixed bottom-3 right-3 bg-black/80 text-white text-sm px-3 py-2 rounded';
+            box.textContent = msg;
+            document.body.appendChild(box);
+            setTimeout(() => box.remove(), 1800);
+        }
+
+        function addAiMessage(html, role = 'assistant') {
+            const wrap = document.createElement('div');
+            wrap.className = role === 'user' ? 'bg-base-200 rounded p-2 mb-2' : 'bg-base-100 rounded p-2 mb-2';
+            wrap.innerHTML = html;
+            const container = document.getElementById('ai-messages');
+            container.appendChild(wrap);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function extractCodeBlock(text) {
+            // Try to extract first triple-backtick block
+            const match = text.match(/```[\s\S]*?```/);
+            if (match) {
+                let blk = match[0];
+                blk = blk.replace(/^```[a-zA-Z0-9_-]*\n?/, '').replace(/```\s*$/, '');
+                return blk;
+            }
+            return null;
+        }
+
+        async function aiSend() {
+            if (!currentFile) {
+                toast('Open a text file first');
+                return;
+            }
+            let apiKey = await getApiKey();
+            if (!apiKey) {
+                toast('Set your API key in Settings (⚙︎)');
+                await toggleAiSettings();
+                return;
+            }
+            const prompt = document.getElementById('ai-input').value.trim();
+            if (!prompt) return;
+            const content = document.getElementById('editor').value;
+            // Determine model/stream/autoApply based on settings.json (single read)
+            const allowedModels = ['gpt-5', 'gpt-5-mini', 'gpt-5-nano'];
+            let model = 'gpt-5-nano';
+            let streamEnabled = true;
+            let autoApply = true;
+            try {
+                const s = await readSettings();
+                const candidate = s.model || model;
+                model = allowedModels.includes(candidate) ? candidate : model;
+                if (typeof s.stream === 'boolean') streamEnabled = s.stream;
+                if (typeof s.autoApply === 'boolean') autoApply = s.autoApply;
+            } catch {}
+
+            addAiMessage(`<div class='text-xs text-gray-500'>You → ${currentFile}</div><div>${prompt.replace(/</g,'&lt;')}</div>`, 'user');
+            document.getElementById('ai-input').value = '';
+
+            const system = `You are a text editing and writing assistant. You will be given the current file path and its entire content. Respond with the FULL updated file content. If no change is needed, return the original content.`;
+            const userMsg = `File: ${currentFile}\n\n--- BEGIN FILE CONTENT ---\n${content}\n--- END FILE CONTENT ---\n\nTask: ${prompt}\n\nReturn only the updated file content in a code block.`;
+
+            // Create a streaming assistant message container
+            const container = document.getElementById('ai-messages');
+            const wrap = document.createElement('div');
+            wrap.className = 'bg-base-100 rounded p-2 mb-2';
+            wrap.innerHTML = `<div class='text-xs text-gray-500'>Agent → ${currentFile}</div><pre class='whitespace-pre-wrap' id='ai-stream-msg'></pre>`;
+            container.appendChild(wrap);
+            container.scrollTop = container.scrollHeight;
+            const streamPre = wrap.querySelector('#ai-stream-msg');
+
+            let fullText = '';
+            try {
+                const res = await fetch(OPENAI_ENDPOINT, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${apiKey}`
+                    },
+                    body: JSON.stringify({
+                        model,
+                        input: `${system}\n\n${userMsg}`,
+                        stream: !!streamEnabled
+                    })
+                });
+                if (!res.ok) {
+                    let bodyText = '';
+                    try { bodyText = await res.text(); } catch {}
+                    throw new Error(`LLM error ${res.status}${bodyText ? ': ' + bodyText : ''}`);
+                }
+                if (!streamEnabled) {
+                    // Non-streaming: parse JSON fully
+                    const data = await res.json();
+                    // Responses API aggregates in output_text
+                    const text = data.output_text || '';
+                    fullText = typeof text === 'string' ? text : (Array.isArray(text) ? text.join('') : '');
+                } else {
+                    if (!res.body) throw new Error('No response body for stream');
+                    const reader = res.body.getReader();
+                    const decoder = new TextDecoder('utf-8');
+                    let done = false;
+                    let buffer = '';
+                    while (!done) {
+                        const { value, done: d } = await reader.read();
+                        done = d;
+                        if (value) buffer += decoder.decode(value, { stream: true });
+                        // Process complete SSE frames separated by blank line
+                        let frameSplit;
+                        while ((frameSplit = buffer.indexOf('\n\n')) >= 0) {
+                            const frame = buffer.slice(0, frameSplit);
+                            buffer = buffer.slice(frameSplit + 2);
+                            const lines = frame.split('\n');
+                            for (const raw of lines) {
+                                const line = raw.trim();
+                                if (!line || !line.startsWith('data:')) continue;
+                                const payload = line.slice(5).trim();
+                                if (payload === '[DONE]') { done = true; break; }
+                                try {
+                                    const json = JSON.parse(payload);
+                                    let delta = '';
+                                    if (json.choices && json.choices[0] && json.choices[0].delta && typeof json.choices[0].delta.content === 'string') {
+                                        delta = json.choices[0].delta.content;
+                                    } else if (json.type === 'response.output_text.delta' && typeof json.delta === 'string') {
+                                        delta = json.delta;
+                                    } else if (json.type === 'response.output_text' && Array.isArray(json.output_text)) {
+                                        delta = json.output_text.join('');
+                                    }
+                                    if (delta) {
+                                        fullText += delta;
+                                        streamPre.textContent = fullText;
+                                        container.scrollTop = container.scrollHeight;
+                                    }
+                                    if (json.type === 'response.completed') { done = true; break; }
+                                } catch {}
+                            }
+                        }
+                    }
+                }
+                // Finished streaming; extract updated file content
+                const block = extractCodeBlock(fullText) || fullText;
+                if (autoApply) {
+                    document.getElementById('editor').value = block;
+                    debouncedUpdate();
+                    await saveFile();
+                }
+            } catch (e) {
+                console.error(e);
+                addAiMessage(`<div class='text-error text-sm'>${String(e)}</div>`, 'assistant');
+            }
+        }
+
+        
+
+        function addToOpenFiles(filename) {
+            const container = document.getElementById('open-files');
+            const existing = Array.from(container.children).find(el => el.dataset && el.dataset.filename === filename);
+            if (!existing) {
+                const tab = document.createElement('a');
+                tab.role = 'tab';
+                tab.className = 'tab tab-sm flex items-center max-w-xs';
+                tab.dataset.filename = filename;
+                tab.title = filename;
+                if (filename === currentFile) {
+                    tab.classList.add('tab-active');
+                }
+                tab.onclick = () => loadFile(filename);
+                tab.innerHTML = `<span class="truncate flex-1 min-w-0" title="${filename}">${filename}</span>
+                    <span class="dirty-dot ml-2 text-amber-700 hidden">●</span>
+                    <button class="btn btn-ghost btn-xs ml-2 shrink-0" onclick="closeTab(event, '${filename}')">✕</button>`;
+                container.appendChild(tab);
+                // sync initial visual state
+                updateTabVisual(filename);
+            }
+        }
+
+        function highlightActiveTab(filename) {
+            const tabs = document.querySelectorAll('#open-files .tab');
+            tabs.forEach(tab => {
+                const fname = tab.dataset && tab.dataset.filename ? tab.dataset.filename : tab.textContent.trim();
+                if (fname === filename) {
+                    tab.classList.add('tab-active');
+                } else {
+                    tab.classList.remove('tab-active');
+                }
+                // keep dirty style if needed
+                updateTabVisual(fname);
+            });
+        }
+
+        function setDirty(filename, isDirty) {
+            if (!filename) return;
+            fileState[filename] = fileState[filename] || { dirty: false, lastSaved: '' };
+            fileState[filename].dirty = !!isDirty;
+            updateTabVisual(filename);
+        }
+
+        function updateTabVisual(filename) {
+            const container = document.getElementById('open-files');
+            const tab = Array.from(container.children).find(el => el.dataset && el.dataset.filename === filename);
+            if (!tab) return;
+            const st = fileState[filename] || { dirty: false };
+            const dot = tab.querySelector('.dirty-dot');
+            const star = tab.querySelector('.star-marker');
+            if (st.dirty) {
+                tab.classList.add('tab-dirty');
+                if (dot) dot.classList.remove('hidden');
+                if (star) star.classList.remove('hidden');
+            } else {
+                tab.classList.remove('tab-dirty');
+                if (dot) dot.classList.add('hidden');
+                if (star) star.classList.add('hidden');
+            }
+        }
+
+        function closeTab(event, filename) {
+            event.stopPropagation();
+            const container = document.getElementById('open-files');
+            const tab = Array.from(container.children).find(el => el.dataset && el.dataset.filename === filename);
+            if (tab) {
+                const isActive = tab.classList.contains('tab-active');
+                container.removeChild(tab);
+                // remove state tracking
+                delete fileState[filename];
+                if (isActive) {
+                    // Switch to another open tab if available
+                    const remaining = container.querySelectorAll('.tab');
+                    if (remaining.length > 0) {
+                        const next = remaining[remaining.length - 1];
+                        const nextFile = next.dataset && next.dataset.filename ? next.dataset.filename : next.textContent.trim();
+                        loadFile(nextFile);
+                    } else {
+                        // No tabs left: clear editor and preview
+                        currentFile = '';
+                        document.getElementById('editor').value = '';
+                        document.getElementById('editor').classList.add('hidden');
+                        document.getElementById('image-viewer').classList.add('hidden');
+                        document.getElementById('pdf-viewer').classList.add('hidden');
+                        document.getElementById('save-btn').classList.add('hidden');
+                        document.getElementById('download-btn').classList.add('hidden');
+                        document.getElementById('preview').innerHTML = '';
+                        document.getElementById('word-count').textContent = 'Word count: N/A';
+                        highlightActiveTab('');
+                    }
+                }
+            }
+        }
+
+        const debouncedUpdate = debounce(() => { updateWordCount(); updatePreview(); }, 150);
+        function onEditorInput() {
+            if (currentFile) {
+                setDirty(currentFile, true);
+                // Update in-memory buffer for current file
+                const st = fileState[currentFile] || (fileState[currentFile] = { dirty: true, lastSaved: '', buffer: '' });
+                st.buffer = document.getElementById('editor').value;
+            }
+            debouncedUpdate();
+        }
+        document.getElementById('editor').addEventListener('input', onEditorInput);
+
+        function toggleDir(el) {
+            const ul = el.nextElementSibling;
+            if (ul && ul.tagName === 'UL') {
+                ul.classList.toggle('hidden');
+                const icon = el.querySelector('.toggle-icon');
+                if (icon) {
+                    icon.textContent = ul.classList.contains('hidden') ? '📁' : '📂';
+                }
+            }
+        }
+
+        function toggleLeft() {
+            document.getElementById('left-panel').classList.toggle('hidden');
+        }
+
+        function toggleRight() {
+            document.getElementById('preview-panel').classList.toggle('hidden');
+        }
+
+        async function newFile() {
+            const filename = prompt('Enter the name of the new file (e.g., newfile.txt):');
+            if (!filename) return;
+            try {
+                const fileHandle = await opfsRoot.getFileHandle(filename, { create: true });
+                const writable = await fileHandle.createWritable();
+                await writable.write('');
+                await writable.close();
+                await buildTreeFromOPFS();
+            } catch (err) {
+                console.error('Error creating new file:', err);
+                alert('Failed to create new file');
+            }
+        }
+
+        async function copyDirectoryToOPFS(dirHandle, opfsDir) {
+            for await (const [name, handle] of dirHandle.entries()) {
+                if (handle.kind === 'file') {
+                    const file = await handle.getFile();
+                    const opfsFile = await opfsDir.getFileHandle(name, { create: true });
+                    const writable = await opfsFile.createWritable();
+                    await writable.write(await file.arrayBuffer());
+                    await writable.close();
+                } else if (handle.kind === 'directory') {
+                    const subDir = await opfsDir.getDirectoryHandle(name, { create: true });
+                    await copyDirectoryToOPFS(handle, subDir);
+                }
+            }
+        }
+
+        async function buildTreeFromOPFS() {
+            const tree = await buildTree(opfsRoot);
+            renderTree(tree);
+        }
+
+        async function buildTree(dirHandle, path = '') {
+            const children = [];
+            for await (const [name, handle] of dirHandle.entries()) {
+                const itemPath = path ? `${path}/${name}` : name;
+                if (handle.kind === 'file') {
+                    children.push({ name, path: itemPath, isDir: false });
+                } else if (handle.kind === 'directory') {
+                    const subChildren = await buildTree(handle, itemPath);
+                    children.push({ name, path: itemPath, isDir: true, children: subChildren });
+                }
+            }
+            return children;
+        }
+
+        function renderTree(tree) {
+            const ul = document.querySelector('#left-panel ul');
+            ul.innerHTML = '';
+            tree.forEach(item => {
+                const li = document.createElement('li');
+                li.className = 'p-1';
+                if (item.isDir) {
+                    li.innerHTML = `<span class="cursor-pointer flex items-center hover:bg-gray-200 rounded px-1 whitespace-nowrap" data-path="${item.path}" data-isdir="true" onclick="toggleDir(this)" oncontextmenu="showContextMenu(event, '${item.path}', true)">
+                        <span class="toggle-icon mr-1">📁</span>
+                        ${item.name}
+                    </span>
+                    <ul class="list-none pl-6 hidden" data-parent="${item.path}">
+                        ${item.children.map(child => renderItem(child)).join('')}
+                    </ul>`;
+                } else {
+                    li.innerHTML = `<span onclick="loadFile('${item.path}')" oncontextmenu="showContextMenu(event, '${item.path}', false)" data-path="${item.path}" data-isdir="false" class="cursor-pointer flex items-center hover:bg-gray-200 rounded px-1 whitespace-nowrap">
+                        📄 ${item.name}
+                    </span>`;
+                }
+                ul.appendChild(li);
+            });
+        }
+
+        function renderItem(item) {
+            if (item.isDir) {
+                return `<li class="p-1">
+                    <span class="cursor-pointer flex items-center hover:bg-gray-200 rounded px-1 whitespace-nowrap" data-path="${item.path}" data-isdir="true" onclick="toggleDir(this)" oncontextmenu="showContextMenu(event, '${item.path}', true)">
+                        <span class="toggle-icon mr-1">📁</span>
+                        ${item.name}
+                    </span>
+                    <ul class="list-none pl-6 hidden" data-parent="${item.path}">
+                        ${item.children.map(child => renderItem(child)).join('')}
+                    </ul>
+                </li>`;
+            } else {
+                return `<li class="p-1">
+                    <span onclick="loadFile('${item.path}')" oncontextmenu="showContextMenu(event, '${item.path}', false)" data-path="${item.path}" data-isdir="false" class="cursor-pointer flex items-center hover:bg-gray-200 rounded px-1 whitespace-nowrap">
+                        📄 ${item.name}
+                    </span>
+                </li>`;
+            }
+        }
+
+        async function saveFile() {
+            const content = document.getElementById('editor').value;
+            try {
+                const fileHandle = await getFileHandle(currentFile);
+                const writable = await fileHandle.createWritable();
+                await writable.write(content);
+                await writable.close();
+                if (currentFile) {
+                    fileState[currentFile] = fileState[currentFile] || {};
+                    fileState[currentFile].lastSaved = content;
+                    fileState[currentFile].buffer = content;
+                    setDirty(currentFile, false);
+                }
+            } catch (err) {
+                console.error('Error saving file:', err);
+            }
+        }
+
+        async function downloadFile() {
+            if (!currentFile) {
+                alert('No file selected');
+                return;
+            }
+            try {
+                const fileHandle = await getFileHandle(currentFile);
+                const file = await fileHandle.getFile();
+                const url = URL.createObjectURL(file);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = currentFile.split('/').pop();
+                a.click();
+                URL.revokeObjectURL(url);
+            } catch (err) {
+                console.error('Error downloading file:', err);
+            }
+        }
+
+        // ===== Context menu + OPFS rename/delete =====
+        let contextMenuPath = '';
+        let contextMenuIsDir = false;
+
+        function showContextMenu(event, path, isDir) {
+            event.preventDefault();
+            contextMenuPath = path;
+            contextMenuIsDir = !!isDir;
+            const menu = document.getElementById('context-menu');
+            menu.style.left = event.pageX + 'px';
+            menu.style.top = event.pageY + 'px';
+            menu.classList.remove('hidden');
+            // Toggle New items visibility based on isDir
+            document.getElementById('cm-new-file').style.display = isDir ? 'block' : 'none';
+            document.getElementById('cm-new-folder').style.display = isDir ? 'block' : 'none';
+        }
+
+        function hideContextMenu() {
+            document.getElementById('context-menu').classList.add('hidden');
+        }
+
+        document.addEventListener('click', () => hideContextMenu());
+        document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideContextMenu(); });
+
+        // Global keyboard shortcuts
+        function handleSaveShortcut(e) {
+            const isSave = (e.metaKey || e.ctrlKey) && e.key && e.key.toLowerCase() === 's';
+            if (!isSave) return;
+            e.preventDefault();
+            e.stopPropagation();
+            if (currentFile) saveFile();
+        }
+        // Capture on multiple targets and in capture phase to override browser default
+        window.addEventListener('keydown', handleSaveShortcut, { capture: true });
+        document.addEventListener('keydown', handleSaveShortcut, { capture: true });
+        document.body.addEventListener('keydown', handleSaveShortcut, { capture: true });
+        // Also bind directly to editor textarea
+        (function(){
+            const ed = document.getElementById('editor');
+            if (ed) ed.addEventListener('keydown', handleSaveShortcut, { capture: true });
+        })();
+
+        async function getDirectoryHandleByPath(path) {
+            // path is relative to opfsRoot
+            let dir = opfsRoot;
+            const parts = path.split('/').filter(Boolean);
+            for (const part of parts) {
+                dir = await dir.getDirectoryHandle(part);
+            }
+            return dir;
+        }
+
+        function splitParent(path) {
+            const parts = path.split('/').filter(Boolean);
+            const name = parts.pop();
+            const parentPath = parts.join('/');
+            return { parentPath, name };
+        }
+
+        // ===== Helpers for DOM updates =====
+        function cssEscapeSel(value) {
+            if (window.CSS && CSS.escape) return CSS.escape(value);
+            return value.replace(/"/g, '\\"');
+        }
+
+        function findSpanByPath(path) {
+            const esc = cssEscapeSel(path || '');
+            return document.querySelector(`[data-path="${esc}"]`);
+        }
+
+        function findChildUL(parentPath) {
+            const esc = cssEscapeSel(parentPath || '');
+            return document.querySelector(`ul[data-parent="${esc}"]`);
+        }
+
+        function basename(p) {
+            const parts = p.split('/').filter(Boolean);
+            return parts.length ? parts[parts.length - 1] : p;
+        }
+
+        function updateDirSubtreePaths(dirSpan, oldPrefix, newPrefix) {
+            const ul = dirSpan.nextElementSibling;
+            if (!ul || ul.tagName !== 'UL') return;
+            ul.setAttribute('data-parent', newPrefix);
+            const descendants = ul.querySelectorAll('[data-path]');
+            descendants.forEach(el => {
+                const oldPath = el.getAttribute('data-path');
+                if (oldPath.startsWith(oldPrefix + '/')) {
+                    const updated = newPrefix + oldPath.slice(oldPrefix.length);
+                    el.setAttribute('data-path', updated);
+                }
+            });
+        }
+
+        async function deleteSelected() {
+            hideContextMenu();
+            if (!contextMenuPath) return;
+            const { parentPath, name } = splitParent(contextMenuPath);
+            try {
+                const parent = await getDirectoryHandleByPath(parentPath);
+                await parent.removeEntry(name, { recursive: contextMenuIsDir });
+                // Update DOM in-place
+                const span = findSpanByPath(contextMenuPath);
+                if (span) {
+                    const li = span.closest('li');
+                    if (li && li.parentElement) li.parentElement.removeChild(li);
+                }
+            } catch (err) {
+                console.error('Error deleting entry:', err);
+                alert('Delete failed');
+            }
+        }
+
+        async function renameSelected() {
+            hideContextMenu();
+            if (!contextMenuPath) return;
+            const { parentPath, name } = splitParent(contextMenuPath);
+            const newName = prompt('New name:', name);
+            if (!newName || newName === name) return;
+            try {
+                const parent = await getDirectoryHandleByPath(parentPath);
+                if (contextMenuIsDir) {
+                    const srcDir = await parent.getDirectoryHandle(name);
+                    const destDir = await parent.getDirectoryHandle(newName, { create: true });
+                    await copyWithinOPFSDirectory(srcDir, destDir);
+                    await parent.removeEntry(name, { recursive: true });
+                } else {
+                    const srcFile = await parent.getFileHandle(name);
+                    const file = await srcFile.getFile();
+                    const destFile = await parent.getFileHandle(newName, { create: true });
+                    const writable = await destFile.createWritable();
+                    await writable.write(await file.arrayBuffer());
+                    await writable.close();
+                    await parent.removeEntry(name);
+                }
+                // DOM update: adjust the span's label and data-path (and subtree if dir)
+                const oldPath = contextMenuPath;
+                const newPath = parentPath ? `${parentPath}/${newName}` : newName;
+                const span = findSpanByPath(oldPath);
+                if (span) {
+                    span.setAttribute('data-path', newPath);
+                    // Update visible name (after icon span)
+                    const icon = span.querySelector('.toggle-icon');
+                    if (icon && icon.nextSibling) {
+                        // Replace following text (might be a text node)
+                        // Simplest: set span innerHTML with preserved icon
+                        if (contextMenuIsDir) icon.textContent = span.nextElementSibling ? '📁' : '📁';
+                    }
+                    // Better: set the text by rebuilding the innerHTML minimal
+                    const nameText = ` ${newName}`;
+                    if (contextMenuIsDir) {
+                        span.innerHTML = `<span class="toggle-icon mr-1">📁</span>${newName}`;
+                    } else {
+                        span.innerHTML = `📄 ${newName}`;
+                    }
+                    // Restore handlers/attributes after innerHTML reset
+                    span.setAttribute('data-path', newPath);
+                    span.setAttribute('data-isdir', contextMenuIsDir ? 'true' : 'false');
+                    if (contextMenuIsDir) {
+                        span.setAttribute('onclick', 'toggleDir(this)');
+                        span.setAttribute('oncontextmenu', `showContextMenu(event, '${newPath}', true)`);
+                        updateDirSubtreePaths(span, oldPath, newPath);
+                    } else {
+                        span.setAttribute('onclick', `loadFile('${newPath}')`);
+                        span.setAttribute('oncontextmenu', `showContextMenu(event, '${newPath}', false)`);
+                    }
+                }
+            } catch (err) {
+                console.error('Error renaming entry:', err);
+                alert('Rename failed');
+            }
+        }
+
+        async function copyWithinOPFSDirectory(srcDir, destDir) {
+            for await (const [entryName, handle] of srcDir.entries()) {
+                if (handle.kind === 'file') {
+                    const file = await handle.getFile();
+                    const destFile = await destDir.getFileHandle(entryName, { create: true });
+                    const writable = await destFile.createWritable();
+                    await writable.write(await file.arrayBuffer());
+                    await writable.close();
+                } else if (handle.kind === 'directory') {
+                    const subDest = await destDir.getDirectoryHandle(entryName, { create: true });
+                    await copyWithinOPFSDirectory(handle, subDest);
+                }
+            }
+        }
+
+        async function copyDirectoryToOPFS(srcDir, destDir) {
+            for await (const [entryName, handle] of srcDir.entries()) {
+                if (handle.kind === 'file') {
+                    const file = await handle.getFile();
+                    const destFile = await destDir.getFileHandle(entryName, { create: true });
+                    const writable = await destFile.createWritable();
+                    await writable.write(await file.arrayBuffer());
+                    await writable.close();
+                } else if (handle.kind === 'directory') {
+                    const subDest = await destDir.getDirectoryHandle(entryName, { create: true });
+                    await copyDirectoryToOPFS(handle, subDest);
+                }
+            }
+        }
+
+        async function addFolder() {
+            try {
+                const expandedBefore = getExpandedPaths();
+                const picked = await window.showDirectoryPicker();
+                // Create (or get) the destination top-level folder in OPFS
+                const destTop = await opfsRoot.getDirectoryHandle(picked.name, { create: true });
+                // Copy content recursively
+                await copyDirectoryToOPFS(picked, destTop);
+                // Refresh entire tree view after import
+                await buildTreeFromOPFS();
+                restoreExpandedPaths(expandedBefore);
+            } catch (err) {
+                if (err && err.name === 'AbortError') return; // user canceled picker
+                console.error('Error adding folder:', err);
+                alert('Failed to add folder');
+            }
+        }
+
+        // ===== Preserve expanded folders across refresh =====
+        function getExpandedPaths() {
+            const paths = [];
+            const spans = document.querySelectorAll('#left-panel [data-isdir="true"][data-path]');
+            spans.forEach(span => {
+                const ul = span.nextElementSibling;
+                if (ul && ul.tagName === 'UL' && !ul.classList.contains('hidden')) {
+                    const p = span.getAttribute('data-path');
+                    if (p) paths.push(p);
+                }
+            });
+            return paths;
+        }
+
+        function restoreExpandedPaths(paths) {
+            if (!paths || !paths.length) return;
+            paths.forEach(p => {
+                const span = findSpanByPath(p);
+                if (!span) return;
+                const ul = span.nextElementSibling;
+                if (ul && ul.tagName === 'UL') {
+                    ul.classList.remove('hidden');
+                    const icon = span.querySelector('.toggle-icon');
+                    if (icon) icon.textContent = '📂';
+                }
+            });
+        }
+
+        async function newFileInContextDir() {
+            hideContextMenu();
+            if (!contextMenuIsDir || !contextMenuPath) return;
+            const filename = prompt('New file name (e.g., note.txt):');
+            if (!filename) return;
+            try {
+                const dir = await getDirectoryHandleByPath(contextMenuPath);
+                const fileHandle = await dir.getFileHandle(filename, { create: true });
+                const writable = await fileHandle.createWritable();
+                await writable.write('');
+                await writable.close();
+                // Append to DOM under this directory if its UL exists
+                const childUL = findChildUL(contextMenuPath);
+                if (childUL) {
+                    const item = { isDir: false, name: filename, path: (contextMenuPath ? contextMenuPath + '/' : '') + filename };
+                    childUL.insertAdjacentHTML('beforeend', renderItem(item));
+                }
+            } catch (err) {
+                console.error('Error creating file:', err);
+                alert('Failed to create file');
+            }
+        }
+
+        async function newFolderInContextDir() {
+            hideContextMenu();
+            if (!contextMenuIsDir || !contextMenuPath) return;
+            const folderName = prompt('New folder name:');
+            if (!folderName) return;
+            try {
+                const dir = await getDirectoryHandleByPath(contextMenuPath);
+                await dir.getDirectoryHandle(folderName, { create: true });
+                const childUL = findChildUL(contextMenuPath);
+                if (childUL) {
+                    const item = { isDir: true, name: folderName, path: (contextMenuPath ? contextMenuPath + '/' : '') + folderName, children: [] };
+                    childUL.insertAdjacentHTML('beforeend', renderItem(item));
+                }
+            } catch (err) {
+                console.error('Error creating folder:', err);
+                alert('Failed to create folder');
+            }
+        }
+    </script>
+    <!-- Settings Modal -->
+    <dialog id="settings-modal" class="modal">
+        <div class="modal-box">
+            <h3 class="font-bold text-lg mb-2">Settings</h3>
+            <div class="space-y-3">
+                <label class="form-control w-full">
+                    <div class="label"><span class="label-text">OpenAI API key</span></div>
+                    <input id="ai-api-key-modal" type="password" class="input input-bordered input-sm w-full" placeholder="sk-..." />
+                    
+                </label>
+                <div class="h-3"></div>
+                <label class="form-control w-full">
+                    <div class="label"><span class="label-text">OpenAI model</span></div>
+                    <select id="ai-model-modal" class="select select-bordered select-sm w-full">
+                        <option value="gpt-5">gpt-5</option>
+                        <option value="gpt-5-mini">gpt-5-mini</option>
+                        <option value="gpt-5-nano">gpt-5-nano</option>
+                    </select>
+                </label>
+                <label class="cursor-pointer flex items-center gap-2 text-sm">
+                    <input id="ai-auto-apply-modal" type="checkbox" class="checkbox checkbox-xs" />
+                    <span>Auto-apply file changes</span>
+                </label>
+            </div>
+            <div class="modal-action">
+                <button class="btn btn-ghost" onclick="document.getElementById('settings-modal').close()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveAiSettings()">Save</button>
+            </div>
+        </div>
+        <form method="dialog" class="modal-backdrop">
+            <button>close</button>
+        </form>
+    </dialog>
+  </body>
+</html>
