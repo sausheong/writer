@@ -1,6 +1,6 @@
 # Writer
 
-A web-based text editor with AI-powered assistance for writing and editing files.
+A web-based text editor with AI agent capabilities for writing and editing files.
 
 ## Features
 
