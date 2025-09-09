@@ -12,6 +12,6 @@ func main() {
 }
 
 func handleHome(w http.ResponseWriter, r *http.Request) {
-	tmpl := template.Must(template.ParseFiles("writer.html"))
+	tmpl := template.Must(template.ParseFiles("index.html"))
 	tmpl.Execute(w, nil)
 }
