@@ -85,6 +85,7 @@
 
             <!-- AI Agent Panel -->
             <div class="flex-1 overflow-y-auto p-3" id="ai-messages" aria-live="polite"></div>
+            <div id="ai-spinner" class="loading loading-spinner loading-sm hidden mx-auto my-2"></div>
             <div class="border-t border-gray-200 p-2 space-y-2">
                 <div class="flex items-center justify-between">
                     <span class="text-sm text-gray-600">Agent</span>
@@ -92,7 +93,7 @@
                 
                 <div class="flex gap-2 items-start">
                     <textarea id="ai-input" placeholder="Ask the AI to modify the current file..." class="textarea textarea-bordered textarea-sm w-full" rows="3"></textarea>
-                    <button class="btn btn-ghost btn-sm" onclick="aiSend()">►</button>
+                    <button id="ai-send-btn" class="btn btn-ghost btn-sm" onclick="aiSend()">►</button>
                 </div>
             </div>
         </div>
@@ -131,23 +132,33 @@
         }
 
         async function initOPFS() {
-            if ('storage' in navigator && 'getDirectory' in navigator.storage) {
-                opfsRoot = await navigator.storage.getDirectory();
-                await buildTreeFromOPFS();
-                // Load persisted settings into UI controls
-                await loadSettingsIntoUI();
-            } else {
-                alert('OPFS not supported');
+            try {
+                if ('storage' in navigator && 'getDirectory' in navigator.storage && 'persist' in navigator.storage) {
+                    const isPersisted = await navigator.storage.persist();
+                    console.log('Storage persisted:', isPersisted);
+                }
+                if ('storage' in navigator && 'getDirectory' in navigator.storage) {
+                    opfsRoot = await navigator.storage.getDirectory();
+                    await buildTreeFromOPFS();
+                    // Load persisted settings into UI controls
+                    await loadSettingsIntoUI();
+                } else {
+                    alert('OPFS not supported');
+                }
+            } catch (err) {
+                console.error('Error initializing OPFS:', err);
+                alert('Failed to initialize file storage. Some features may not work.');
             }
         }
 
         async function getFileHandle(path) {
+            if (!opfsRoot) throw new Error('File storage not initialized');
             const parts = path.split('/');
             let dir = opfsRoot;
             for (let i = 0; i < parts.length - 1; i++) {
-                dir = await dir.getDirectoryHandle(parts[i]);
+                dir = await dir.getDirectoryHandle(parts[i], { create: true });
             }
-            return await dir.getFileHandle(parts[parts.length - 1]);
+            return await dir.getFileHandle(parts[parts.length - 1], { create: true });
         }
 
         initOPFS();
@@ -482,6 +493,12 @@
             const streamPre = wrap.querySelector('#ai-stream-msg');
 
             let fullText = '';
+            const spinner = document.getElementById('ai-spinner');
+            const sendBtn = document.getElementById('ai-send-btn');
+            const input = document.getElementById('ai-input');
+            spinner.classList.remove('hidden');
+            sendBtn.disabled = true;
+            input.disabled = true;
             try {
                 const res = await fetch(OPENAI_ENDPOINT, {
                     method: 'POST',
@@ -558,6 +575,13 @@
             } catch (e) {
                 console.error(e);
                 addAiMessage(`<div class='text-error text-sm'>${String(e)}</div>`, 'assistant');
+            } finally {
+                const spinner = document.getElementById('ai-spinner');
+                const sendBtn = document.getElementById('ai-send-btn');
+                const input = document.getElementById('ai-input');
+                spinner.classList.add('hidden');
+                sendBtn.disabled = false;
+                input.disabled = false;
             }
         }
 
@@ -795,6 +819,7 @@
                 }
             } catch (err) {
                 console.error('Error saving file:', err);
+                alert('Failed to save file');
             }
         }
 
