@@ -132,43 +132,25 @@
         }
 
         async function initOPFS() {
-            try {
-                console.log('Initializing OPFS...');
-                if ('storage' in navigator && 'getDirectory' in navigator.storage && 'persist' in navigator.storage) {
-                    const isPersisted = await navigator.storage.persist();
-                    console.log('Storage persisted:', isPersisted);
-                    
-                    // Check storage estimate
-                    const estimate = await navigator.storage.estimate();
-                    console.log('Storage estimate:', estimate);
-                }
-                if ('storage' in navigator && 'getDirectory' in navigator.storage) {
-                    console.log('Getting OPFS root directory...');
-                    opfsRoot = await navigator.storage.getDirectory();
-                    console.log('OPFS root obtained:', opfsRoot);
-                    
-                    await buildTreeFromOPFS();
-                    // Load persisted settings into UI controls
-                    await loadSettingsIntoUI();
-                    
-                    console.log('OPFS initialization complete');
-                } else {
-                    alert('OPFS not supported');
-                }
-            } catch (err) {
-                console.error('Error initializing OPFS:', err);
-                alert('Failed to initialize file storage. Some features may not work.');
+            if ('storage' in navigator && 'getDirectory' in navigator.storage) {
+                opfsRoot = await navigator.storage.getDirectory();
+                await buildTreeFromOPFS();
+                // Load persisted settings into UI controls
+                await loadSettingsIntoUI();
+            } else {
+                alert('OPFS not supported');
             }
         }
 
-        async function getFileHandle(path) {
-            if (!opfsRoot) throw new Error('File storage not initialized');
-            const parts = path.split('/');
+        async function getFileHandle(path, createDirs = false, createFile = false) {
+            const parts = path.split('/').filter(Boolean);
             let dir = opfsRoot;
             for (let i = 0; i < parts.length - 1; i++) {
-                dir = await dir.getDirectoryHandle(parts[i], { create: true });
+                const segment = parts[i];
+                dir = await dir.getDirectoryHandle(segment, createDirs ? { create: true } : {});
             }
-            return await dir.getFileHandle(parts[parts.length - 1], { create: true });
+            const fileName = parts[parts.length - 1];
+            return await dir.getFileHandle(fileName, createFile ? { create: true } : {});
         }
 
         initOPFS();
@@ -486,13 +468,8 @@
                 if (typeof s.stream === 'boolean') streamEnabled = s.stream;
                 if (typeof s.autoApply === 'boolean') autoApply = s.autoApply;
             } catch {}
-            console.log('AI settings resolved:', { model, streamEnabled, autoApply });
 
-            // Capture the file we intend to modify at the start of the request
-            const targetFile = currentFile;
-            console.log('AI target file captured:', targetFile);
-
-            addAiMessage(`<div class='text-xs text-gray-500'>You → ${targetFile}</div><div>${prompt.replace(/</g,'&lt;')}</div>`, 'user');
+            addAiMessage(`<div class='text-xs text-gray-500'>You → ${currentFile}</div><div>${prompt.replace(/</g,'&lt;')}</div>`, 'user');
             document.getElementById('ai-input').value = '';
 
             const system = `You are a text editing and writing assistant. You will be given the current file path and its entire content. Respond with the FULL updated file content. If no change is needed, return the original content.`;
@@ -582,30 +559,10 @@
                 }
                 // Finished streaming; extract updated file content
                 const block = extractCodeBlock(fullText) || fullText;
-                console.log('AI response received. Extracted content length:', (block || '').length);
                 if (autoApply) {
-                    console.log('Auto-applying AI changes to file:', targetFile);
-                    const ok = await saveFileTo(targetFile, block);
-                    if (ok) {
-                        if (currentFile === targetFile) {
-                            // Still on the same file: update editor view
-                            document.getElementById('editor').value = block;
-                            debouncedUpdate();
-                        } else {
-                            // Updated a different tab in the background; sync in-memory state
-                            fileState[targetFile] = fileState[targetFile] || {};
-                            fileState[targetFile].buffer = block;
-                            fileState[targetFile].lastSaved = block;
-                            setDirty(targetFile, false);
-                            updateTabVisual(targetFile);
-                        }
-                        toast(`AI changes applied and saved to ${targetFile}`);
-                    } else {
-                        toast('Failed to save AI changes');
-                    }
-                } else {
-                    console.log('Auto-apply is disabled; not writing to file automatically.');
-                    toast('AI changes ready. Auto-apply is off. Review and save manually.');
+                    document.getElementById('editor').value = block;
+                    debouncedUpdate();
+                    await saveFile();
                 }
             } catch (e) {
                 console.error(e);
@@ -748,10 +705,10 @@
         }
 
         async function newFile() {
-            const filename = prompt('Enter the name of the new file (e.g., newfile.txt):');
+            const filename = prompt('Enter the name of the new file (e.g., notes/newfile.txt):');
             if (!filename) return;
             try {
-                const fileHandle = await opfsRoot.getFileHandle(filename, { create: true });
+                const fileHandle = await getFileHandle(filename, true, true);
                 const writable = await fileHandle.createWritable();
                 await writable.write('');
                 await writable.close();
@@ -778,9 +735,7 @@
         }
 
         async function buildTreeFromOPFS() {
-            console.log('Building tree from OPFS...');
             const tree = await buildTree(opfsRoot);
-            console.log('OPFS tree built:', tree);
             renderTree(tree);
         }
 
@@ -843,38 +798,20 @@
 
         async function saveFile() {
             const content = document.getElementById('editor').value;
-            return await saveFileTo(currentFile, content);
-        }
-
-        async function saveFileTo(filename, content) {
-            if (!filename) throw new Error('No target filename provided');
-            console.log('Attempting to save file:', filename, 'Content length:', (content || '').length);
             try {
-                const fileHandle = await getFileHandle(filename);
-                console.log('Got file handle:', fileHandle);
+                // Ensure path exists and file is created if missing
+                const fileHandle = await getFileHandle(currentFile, true, true);
                 const writable = await fileHandle.createWritable();
-                console.log('Got writable stream');
-                await writable.write(content || '');
-                console.log('Wrote content');
+                await writable.write(content);
                 await writable.close();
-                console.log('Closed writable stream');
-                
-                // Verify the file was written
-                const verifyFile = await fileHandle.getFile();
-                const verifyContent = await verifyFile.text();
-                console.log('Verification - file size:', verifyContent.length, 'Content matches:', verifyContent === (content || ''));
-                
-                // Update state tracking for that file
-                fileState[filename] = fileState[filename] || {};
-                fileState[filename].lastSaved = content || '';
-                fileState[filename].buffer = content || '';
-                setDirty(filename, false);
-                console.log('File saved successfully:', filename);
-                return true;
+                if (currentFile) {
+                    fileState[currentFile] = fileState[currentFile] || {};
+                    fileState[currentFile].lastSaved = content;
+                    fileState[currentFile].buffer = content;
+                    setDirty(currentFile, false);
+                }
             } catch (err) {
                 console.error('Error saving file:', err);
-                alert('Failed to save file');
-                return false;
             }
         }
 
