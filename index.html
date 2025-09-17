@@ -422,6 +422,20 @@
             setTimeout(() => box.remove(), 1800);
         }
 
+        function downloadContentAs(filename, content, mime = 'text/plain') {
+            try {
+                const blob = new Blob([content], { type: mime });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = (filename || 'untitled.txt').split('/').pop();
+                a.click();
+                URL.revokeObjectURL(url);
+            } catch (e) {
+                console.error('Download fallback failed:', e);
+            }
+        }
+
         function addAiMessage(html, role = 'assistant') {
             const wrap = document.createElement('div');
             wrap.className = role === 'user' ? 'bg-base-200 rounded p-2 mb-2' : 'bg-base-100 rounded p-2 mb-2';
@@ -444,8 +458,28 @@
 
         async function aiSend() {
             if (!currentFile) {
-                toast('Open a text file first');
-                return;
+                // Allow user to create a file so the response can be saved
+                const fname = prompt('No file is open. Enter a new file name to create (e.g., notes/untitled.md):', 'untitled.md');
+                if (!fname) { toast('Open or create a file first'); return; }
+                try {
+                    const fh = await getFileHandle(fname, true, true);
+                    const w = await fh.createWritable();
+                    await w.write('');
+                    await w.close();
+                    currentFile = fname;
+                    addToOpenFiles(currentFile);
+                    highlightActiveTab(currentFile);
+                    const expandedBefore = getExpandedPaths();
+                    await buildTreeFromOPFS();
+                    restoreExpandedPaths(expandedBefore);
+                    document.getElementById('editor').classList.remove('hidden');
+                    document.getElementById('save-btn').classList.remove('hidden');
+                    document.getElementById('download-btn').classList.remove('hidden');
+                } catch (e) {
+                    console.error('Failed to create file for AI response', e);
+                    toast('Failed to create file');
+                    return;
+                }
             }
             let apiKey = await getApiKey();
             if (!apiKey) {
@@ -563,6 +597,7 @@
                 document.getElementById('editor').value = block;
                 debouncedUpdate();
                 await saveFile();
+                addAiMessage(`<div class='text-xs text-gray-500'>Saved to ${currentFile}</div>`, 'assistant');
             } catch (e) {
                 console.error(e);
                 addAiMessage(`<div class='text-error text-sm'>${String(e)}</div>`, 'assistant');
@@ -797,6 +832,15 @@
 
         async function saveFile() {
             const content = document.getElementById('editor').value;
+            if (!currentFile) {
+                toast('No file is open to save');
+                return;
+            }
+            if (!opfsRoot) {
+                toast('Storage not initialized');
+                try { await initOPFS(); } catch {}
+                if (!opfsRoot) { toast('OPFS not available in this browser'); return; }
+            }
             try {
                 // Ensure path exists and file is created if missing
                 const fileHandle = await getFileHandle(currentFile, true, true);
@@ -809,8 +853,20 @@
                     fileState[currentFile].buffer = content;
                     setDirty(currentFile, false);
                 }
+                // If the file wasn't in the sidebar yet (new path), rebuild the tree
+                const existingSpan = findSpanByPath(currentFile);
+                if (!existingSpan) {
+                    const expandedBefore = getExpandedPaths();
+                    await buildTreeFromOPFS();
+                    restoreExpandedPaths(expandedBefore);
+                }
+                highlightActiveTab(currentFile);
+                toast(`Saved: ${currentFile}`);
             } catch (err) {
                 console.error('Error saving file:', err);
+                toast(`Save failed: ${String(err && err.message ? err.message : err)}. Downloading instead...`);
+                // Fallback: offer download so user doesn't lose work
+                downloadContentAs(currentFile || 'untitled.txt', content);
             }
         }
 
