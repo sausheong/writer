@@ -133,15 +133,25 @@
 
         async function initOPFS() {
             try {
+                console.log('Initializing OPFS...');
                 if ('storage' in navigator && 'getDirectory' in navigator.storage && 'persist' in navigator.storage) {
                     const isPersisted = await navigator.storage.persist();
                     console.log('Storage persisted:', isPersisted);
+                    
+                    // Check storage estimate
+                    const estimate = await navigator.storage.estimate();
+                    console.log('Storage estimate:', estimate);
                 }
                 if ('storage' in navigator && 'getDirectory' in navigator.storage) {
+                    console.log('Getting OPFS root directory...');
                     opfsRoot = await navigator.storage.getDirectory();
+                    console.log('OPFS root obtained:', opfsRoot);
+                    
                     await buildTreeFromOPFS();
                     // Load persisted settings into UI controls
                     await loadSettingsIntoUI();
+                    
+                    console.log('OPFS initialization complete');
                 } else {
                     alert('OPFS not supported');
                 }
@@ -743,7 +753,9 @@
         }
 
         async function buildTreeFromOPFS() {
+            console.log('Building tree from OPFS...');
             const tree = await buildTree(opfsRoot);
+            console.log('OPFS tree built:', tree);
             renderTree(tree);
         }
 
@@ -806,17 +818,29 @@
 
         async function saveFile() {
             const content = document.getElementById('editor').value;
+            console.log('Attempting to save file:', currentFile, 'Content length:', content.length);
             try {
                 const fileHandle = await getFileHandle(currentFile);
+                console.log('Got file handle:', fileHandle);
                 const writable = await fileHandle.createWritable();
+                console.log('Got writable stream');
                 await writable.write(content);
+                console.log('Wrote content');
                 await writable.close();
+                console.log('Closed writable stream');
+                
+                // Verify the file was written
+                const verifyFile = await fileHandle.getFile();
+                const verifyContent = await verifyFile.text();
+                console.log('Verification - file size:', verifyContent.length, 'Content matches:', verifyContent === content);
+                
                 if (currentFile) {
                     fileState[currentFile] = fileState[currentFile] || {};
                     fileState[currentFile].lastSaved = content;
                     fileState[currentFile].buffer = content;
                     setDirty(currentFile, false);
                 }
+                console.log('File saved successfully:', currentFile);
             } catch (err) {
                 console.error('Error saving file:', err);
                 alert('Failed to save file');
