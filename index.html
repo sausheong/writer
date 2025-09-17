@@ -559,11 +559,10 @@
                 }
                 // Finished streaming; extract updated file content
                 const block = extractCodeBlock(fullText) || fullText;
-                if (autoApply) {
-                    document.getElementById('editor').value = block;
-                    debouncedUpdate();
-                    await saveFile();
-                }
+                // Always write the response to the currently open file
+                document.getElementById('editor').value = block;
+                debouncedUpdate();
+                await saveFile();
             } catch (e) {
                 console.error(e);
                 addAiMessage(`<div class='text-error text-sm'>${String(e)}</div>`, 'assistant');
