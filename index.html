@@ -112,15 +112,61 @@
             <button id="download-btn" onclick="downloadFile()" class="btn btn-sm btn-info hidden">download</button>
         </div>
     </div>
+    <!-- Settings Modal -->
+    <dialog id="settings-modal" class="modal">
+        <div class="modal-box">
+            <h3 class="font-bold text-lg mb-2">Settings</h3>
+            <div class="space-y-3">
+                <label class="form-control w-full">
+                    <div class="label"><span class="label-text">OpenAI API key</span></div>
+                    <input id="ai-api-key-modal" type="password" class="input input-bordered input-sm w-full" placeholder="sk-..." />
+                    
+                </label>
+                <div class="h-3"></div>
+                <label class="form-control w-full">
+                    <div class="label"><span class="label-text">OpenAI model</span></div>
+                    <select id="ai-model-modal" class="select select-bordered select-sm w-full">
+                        <option value="gpt-5">gpt-5</option>
+                        <option value="gpt-5-mini">gpt-5-mini</option>
+                        <option value="gpt-5-nano">gpt-5-nano</option>
+                    </select>
+                </label>
+                <label class="cursor-pointer flex items-center gap-2 text-sm">
+                    <input id="ai-auto-apply-modal" type="checkbox" class="checkbox checkbox-xs" />
+                    <span>Auto-apply file changes</span>
+                </label>
+            </div>
+            <div class="modal-action">
+                <button class="btn btn-ghost" onclick="document.getElementById('settings-modal').close()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveAiSettings()">Save</button>
+            </div>
+        </div>
+        <form method="dialog" class="modal-backdrop">
+            <button>close</button>
+        </form>
+    </dialog>
     <script>
+        'use strict';
         let currentFile = '';
         let opfsRoot;
         let currentBlobUrl = null; // track last created object URL to revoke
         const MAX_PREVIEW_BYTES = 500000; // ~500KB limit for preview to keep it responsive
         let previewWin = null; // external preview window reference
         const OPENAI_ENDPOINT = 'https://api.openai.com/v1/responses';
+        // Model configuration
+        const ALLOWED_MODELS = ['gpt-5', 'gpt-5-mini', 'gpt-5-nano'];
+        const DEFAULT_MODEL = 'gpt-5-nano';
         // Track per-file state (dirty, lastSaved, and in-memory buffer)
         const fileState = {}; // { [filename]: { dirty: boolean, lastSaved: string, buffer: string } }
+
+        /*
+         Sections overview (logical modules):
+         - OPFS: initOPFS, getFileHandle, read/write OPFS files, settings, tree build/copy helpers
+         - UI: preview, tabs, editor state, toasts, context menu, keyboard shortcuts
+         - AI: settings modal, aiSend (streaming + save), code block extraction
+         The actual function order below remains mostly the same to minimize risk,
+         but a consolidated `Modules` object is created at the end for grouped access.
+        */
 
         // Simple debounce utility to reduce heavy work on fast events
         function debounce(fn, delay) {
@@ -491,14 +537,13 @@
             if (!prompt) return;
             const content = document.getElementById('editor').value;
             // Determine model/stream/autoApply based on settings.json (single read)
-            const allowedModels = ['gpt-5', 'gpt-5-mini', 'gpt-5-nano'];
-            let model = 'gpt-5-nano';
+            let model = DEFAULT_MODEL;
             let streamEnabled = true;
             let autoApply = true;
             try {
                 const s = await readSettings();
                 const candidate = s.model || model;
-                model = allowedModels.includes(candidate) ? candidate : model;
+                model = ALLOWED_MODELS.includes(candidate) ? candidate : model;
                 if (typeof s.stream === 'boolean') streamEnabled = s.stream;
                 if (typeof s.autoApply === 'boolean') autoApply = s.autoApply;
             } catch {}
@@ -1077,20 +1122,7 @@
             }
         }
 
-        async function copyDirectoryToOPFS(srcDir, destDir) {
-            for await (const [entryName, handle] of srcDir.entries()) {
-                if (handle.kind === 'file') {
-                    const file = await handle.getFile();
-                    const destFile = await destDir.getFileHandle(entryName, { create: true });
-                    const writable = await destFile.createWritable();
-                    await writable.write(await file.arrayBuffer());
-                    await writable.close();
-                } else if (handle.kind === 'directory') {
-                    const subDest = await destDir.getDirectoryHandle(entryName, { create: true });
-                    await copyDirectoryToOPFS(handle, subDest);
-                }
-            }
-        }
+        // (Removed duplicate copyDirectoryToOPFS; single definition exists earlier in file)
 
         async function addFolder() {
             try {
@@ -1179,39 +1211,64 @@
                 alert('Failed to create folder');
             }
         }
+
+        // Consolidated modules map for readability and discoverability only (no behavioral change)
+        const Modules = Object.freeze({
+            OPFS: Object.freeze({
+                initOPFS,
+                getFileHandle,
+                readOpfsFileText,
+                writeOpfsFileText,
+                readSettings,
+                writeSettings,
+                getApiKey,
+                loadSettingsIntoUI,
+                buildTreeFromOPFS,
+                buildTree,
+                copyWithinOPFSDirectory,
+                copyDirectoryToOPFS,
+                getDirectoryHandleByPath,
+                splitParent,
+            }),
+            UI: Object.freeze({
+                debounce,
+                updateWordCount,
+                updatePreview,
+                popoutPreview,
+                renderPreviewToWindow,
+                toast,
+                downloadContentAs,
+                addToOpenFiles,
+                highlightActiveTab,
+                setDirty,
+                updateTabVisual,
+                closeTab,
+                toggleDir,
+                toggleLeft,
+                toggleRight,
+                renderTree,
+                renderItem,
+                getExpandedPaths,
+                restoreExpandedPaths,
+                showContextMenu,
+                hideContextMenu,
+                findSpanByPath,
+                findChildUL,
+                addFolder,
+                newFile,
+                newFileInContextDir,
+                newFolderInContextDir,
+                downloadFile,
+                saveFile,
+                loadFile,
+            }),
+            AI: Object.freeze({
+                toggleAiSettings,
+                saveAiSettings,
+                aiSend,
+                extractCodeBlock,
+            }),
+        });
     </script>
-    <!-- Settings Modal -->
-    <dialog id="settings-modal" class="modal">
-        <div class="modal-box">
-            <h3 class="font-bold text-lg mb-2">Settings</h3>
-            <div class="space-y-3">
-                <label class="form-control w-full">
-                    <div class="label"><span class="label-text">OpenAI API key</span></div>
-                    <input id="ai-api-key-modal" type="password" class="input input-bordered input-sm w-full" placeholder="sk-..." />
-                    
-                </label>
-                <div class="h-3"></div>
-                <label class="form-control w-full">
-                    <div class="label"><span class="label-text">OpenAI model</span></div>
-                    <select id="ai-model-modal" class="select select-bordered select-sm w-full">
-                        <option value="gpt-5">gpt-5</option>
-                        <option value="gpt-5-mini">gpt-5-mini</option>
-                        <option value="gpt-5-nano">gpt-5-nano</option>
-                    </select>
-                </label>
-                <label class="cursor-pointer flex items-center gap-2 text-sm">
-                    <input id="ai-auto-apply-modal" type="checkbox" class="checkbox checkbox-xs" />
-                    <span>Auto-apply file changes</span>
-                </label>
-            </div>
-            <div class="modal-action">
-                <button class="btn btn-ghost" onclick="document.getElementById('settings-modal').close()">Cancel</button>
-                <button class="btn btn-primary" onclick="saveAiSettings()">Save</button>
-            </div>
-        </div>
-        <form method="dialog" class="modal-backdrop">
-            <button>close</button>
-        </form>
-    </dialog>
   </body>
 </html>
