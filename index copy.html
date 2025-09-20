@@ -118,15 +118,17 @@
             <h3 class="font-bold text-lg mb-2">Settings</h3>
             <div class="space-y-3">
                 <label class="form-control w-full">
-                    <div class="label"><span class="label-text">Google API key</span></div>
+                    <div class="label"><span class="label-text">OpenAI API key</span></div>
                     <input id="ai-api-key-modal" type="password" class="input input-bordered input-sm w-full" placeholder="sk-..." />
                     
                 </label>
                 <div class="h-3"></div>
                 <label class="form-control w-full">
-                    <div class="label"><span class="label-text">Gemini model</span></div>
+                    <div class="label"><span class="label-text">OpenAI model</span></div>
                     <select id="ai-model-modal" class="select select-bordered select-sm w-full">
-                        <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+                        <option value="gpt-5">gpt-5</option>
+                        <option value="gpt-5-mini">gpt-5-mini</option>
+                        <option value="gpt-5-nano">gpt-5-nano</option>
                     </select>
                 </label>
                 <label class="cursor-pointer flex items-center gap-2 text-sm">
@@ -150,11 +152,10 @@
         let currentBlobUrl = null; // track last created object URL to revoke
         const MAX_PREVIEW_BYTES = 500000; // ~500KB limit for preview to keep it responsive
         let previewWin = null; // external preview window reference
-        // Gemini API configuration
-        const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
+        const OPENAI_ENDPOINT = 'https://api.openai.com/v1/responses';
         // Model configuration
-        const ALLOWED_MODELS = ['gemini-2.5-flash'];
-        const DEFAULT_MODEL = 'gemini-2.5-flash';
+        const ALLOWED_MODELS = ['gpt-5', 'gpt-5-mini', 'gpt-5-nano'];
+        const DEFAULT_MODEL = 'gpt-5-nano';
         // Track per-file state (dirty, lastSaved, and in-memory buffer)
         const fileState = {}; // { [filename]: { dirty: boolean, lastSaved: string, buffer: string } }
 
@@ -570,18 +571,17 @@
             sendBtn.disabled = true;
             input.disabled = true;
             try {
-                const endpoint = `${GEMINI_API_BASE}/models/${encodeURIComponent(model)}:${streamEnabled ? 'streamGenerateContent' : 'generateContent'}?key=${encodeURIComponent(apiKey)}${streamEnabled ? '&alt=sse' : ''}`;
-                const body = {
-                    systemInstruction: { role: 'system', parts: [{ text: system }] },
-                    contents: [
-                        { role: 'user', parts: [{ text: userMsg }] }
-                    ],
-                    generationConfig: { temperature: 0.3 }
-                };
-                const res = await fetch(endpoint, {
+                const res = await fetch(OPENAI_ENDPOINT, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(body)
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${apiKey}`
+                    },
+                    body: JSON.stringify({
+                        model,
+                        input: `${system}\n\n${userMsg}`,
+                        stream: !!streamEnabled
+                    })
                 });
                 if (!res.ok) {
                     let bodyText = '';
@@ -589,13 +589,11 @@
                     throw new Error(`LLM error ${res.status}${bodyText ? ': ' + bodyText : ''}`);
                 }
                 if (!streamEnabled) {
-                    // Non-streaming: parse JSON fully (Gemini generateContent)
+                    // Non-streaming: parse JSON fully
                     const data = await res.json();
-                    const candidates = Array.isArray(data.candidates) ? data.candidates : [];
-                    if (candidates.length) {
-                        const parts = (candidates[0].content && Array.isArray(candidates[0].content.parts)) ? candidates[0].content.parts : [];
-                        for (const p of parts) { if (typeof p.text === 'string') fullText += p.text; }
-                    }
+                    // Responses API aggregates in output_text
+                    const text = data.output_text || '';
+                    fullText = typeof text === 'string' ? text : (Array.isArray(text) ? text.join('') : '');
                 } else {
                     if (!res.body) throw new Error('No response body for stream');
                     const reader = res.body.getReader();
@@ -619,18 +617,20 @@
                                 if (payload === '[DONE]') { done = true; break; }
                                 try {
                                     const json = JSON.parse(payload);
-                                    // Each SSE message is a partial GenerateContentResponse
-                                    const cands = Array.isArray(json.candidates) ? json.candidates : [];
-                                    if (cands.length) {
-                                        const parts = (cands[0].content && Array.isArray(cands[0].content.parts)) ? cands[0].content.parts : [];
-                                        let delta = '';
-                                        for (const p of parts) { if (typeof p.text === 'string') delta += p.text; }
-                                        if (delta) {
-                                            fullText += delta;
-                                            streamPre.textContent = fullText;
-                                            container.scrollTop = container.scrollHeight;
-                                        }
+                                    let delta = '';
+                                    if (json.choices && json.choices[0] && json.choices[0].delta && typeof json.choices[0].delta.content === 'string') {
+                                        delta = json.choices[0].delta.content;
+                                    } else if (json.type === 'response.output_text.delta' && typeof json.delta === 'string') {
+                                        delta = json.delta;
+                                    } else if (json.type === 'response.output_text' && Array.isArray(json.output_text)) {
+                                        delta = json.output_text.join('');
                                     }
+                                    if (delta) {
+                                        fullText += delta;
+                                        streamPre.textContent = fullText;
+                                        container.scrollTop = container.scrollHeight;
+                                    }
+                                    if (json.type === 'response.completed') { done = true; break; }
                                 } catch {}
                             }
                         }
