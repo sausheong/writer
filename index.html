@@ -78,6 +78,21 @@
             <textarea id="editor" placeholder="Select a file to edit..." class="w-full h-full border-none resize-none bg-white p-4 rounded shadow-sm"></textarea>
             <img id="image-viewer" class="w-full h-full object-contain hidden absolute inset-0" />
             <iframe id="pdf-viewer" class="w-full h-full hidden absolute inset-0"></iframe>
+            <!-- Find Panel -->
+            <div id="find-panel" class="absolute top-2 right-4 bg-white shadow rounded border border-gray-200 p-2 hidden">
+                <div class="flex items-center gap-2 mb-1">
+                    <input id="find-input" type="text" class="input input-bordered input-xs w-52" placeholder="Find..." />
+                    <span id="find-count" class="text-xs text-gray-500">0/0</span>
+                    <button type="button" class="btn btn-xs" onclick="findPrev()" title="Previous (Shift+Enter)">↑</button>
+                    <button type="button" class="btn btn-xs" onclick="findNext()" title="Next (Enter)">↓</button>
+                    <button type="button" class="btn btn-ghost btn-xs" onclick="closeFind()" title="Close (Esc)">✕</button>
+                </div>
+                <div class="flex items-center gap-2">
+                    <input id="replace-input" type="text" class="input input-bordered input-xs w-52" placeholder="Replace with..." />
+                    <button type="button" class="btn btn-xs btn-primary" onclick="replaceCurrent()" title="Replace (Enter)">Replace</button>
+                    <button type="button" class="btn btn-xs btn-accent" onclick="replaceAll()" title="Replace All">Replace All</button>
+                </div>
+            </div>
         </div>
         <div class="w-1/3 bg-gray-50 p-0 flex flex-col" id="preview-panel">
             <!-- Keep hidden preview to avoid breaking existing code paths -->
@@ -491,14 +506,21 @@
         }
 
         function extractCodeBlock(text) {
-            // Try to extract first triple-backtick block
-            const match = text.match(/```[\s\S]*?```/);
-            if (match) {
-                let blk = match[0];
-                blk = blk.replace(/^```[a-zA-Z0-9_-]*\n?/, '').replace(/```\s*$/, '');
-                return blk;
+            // Extract ALL triple-backtick blocks and return the longest one.
+            // This avoids saving partial or empty code blocks when the model emits multiple blocks.
+            if (!text) return null;
+            const regex = /```[\s\S]*?```/g;
+            const blocks = [];
+            let m;
+            while ((m = regex.exec(text)) !== null) {
+                blocks.push(m[0]);
             }
-            return null;
+            if (blocks.length === 0) return null;
+            // Choose the longest block, which is most likely the full file content
+            let longest = blocks.reduce((a, b) => (a.length >= b.length ? a : b));
+            // Strip the fences and optional language tag
+            longest = longest.replace(/^```[a-zA-Z0-9_\-]*\n?/, '').replace(/```\s*$/, '');
+            return longest;
         }
 
         async function aiSend() {
@@ -550,8 +572,14 @@
             addAiMessage(`<div class='text-xs text-gray-500'>You → ${currentFile}</div><div>${prompt.replace(/</g,'&lt;')}</div>`, 'user');
             document.getElementById('ai-input').value = '';
 
-            const system = `You are a text editing and writing assistant. You will be given the current file path and its entire content. Respond with the FULL updated file content. If no change is needed, return the original content.`;
-            const userMsg = `File: ${currentFile}\n\n--- BEGIN FILE CONTENT ---\n${content}\n--- END FILE CONTENT ---\n\nTask: ${prompt}\n\nReturn only the updated file content in a code block.`;
+            const systemBase = `You are a meticulous text editing and writing assistant.
+You will be given the current file path and its entire content.
+CRITICAL OUTPUT REQUIREMENTS:
+1) Always respond with a SINGLE fenced Markdown code block (triple backticks).
+2) That block MUST contain ONLY the FULL updated file content, with no commentary before or after.
+3) If no change is needed or you are unsure, return the ORIGINAL content in the code block.
+4) Never output an empty code block.`;
+            const userMsgBase = (filePath, fileContent, task) => `File: ${filePath}\n\n--- BEGIN FILE CONTENT ---\n${fileContent}\n--- END FILE CONTENT ---\n\nTask: ${task}\n\nReturn only the updated file content in a single fenced code block.`;
 
             // Create a streaming assistant message container
             const container = document.getElementById('ai-messages');
@@ -572,9 +600,9 @@
             try {
                 const endpoint = `${GEMINI_API_BASE}/models/${encodeURIComponent(model)}:${streamEnabled ? 'streamGenerateContent' : 'generateContent'}?key=${encodeURIComponent(apiKey)}${streamEnabled ? '&alt=sse' : ''}`;
                 const body = {
-                    systemInstruction: { role: 'system', parts: [{ text: system }] },
+                    systemInstruction: { role: 'system', parts: [{ text: systemBase }] },
                     contents: [
-                        { role: 'user', parts: [{ text: userMsg }] }
+                        { role: 'user', parts: [{ text: userMsgBase(currentFile, content, prompt) }] }
                     ],
                     generationConfig: { temperature: 0.3 }
                 };
@@ -637,8 +665,50 @@
                     }
                 }
                 // Finished streaming; extract updated file content
-                const block = extractCodeBlock(fullText) || fullText;
-                // Always write the response to the currently open file
+                let block = extractCodeBlock(fullText);
+                if (block == null) {
+                    block = fullText || '';
+                }
+                // If empty, auto-retry once with stricter non-streaming request
+                if (!block || block.trim().length === 0) {
+                    try {
+                        const strictSystem = systemBase + `\n\nSTRICT MODE: You MUST output a single fenced code block containing the FULL file content. If you cannot produce changes, output the ORIGINAL content. Do not include any explanations.`;
+                        const retryEndpoint = `${GEMINI_API_BASE}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+                        const retryBody = {
+                            systemInstruction: { role: 'system', parts: [{ text: strictSystem }] },
+                            contents: [
+                                { role: 'user', parts: [{ text: userMsgBase(currentFile, content, prompt) }] }
+                            ],
+                            generationConfig: { temperature: 0.2 }
+                        };
+                        const retryRes = await fetch(retryEndpoint, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(retryBody)
+                        });
+                        if (retryRes.ok) {
+                            const data2 = await retryRes.json();
+                            let retryText = '';
+                            const candidates2 = Array.isArray(data2.candidates) ? data2.candidates : [];
+                            if (candidates2.length) {
+                                const parts2 = (candidates2[0].content && Array.isArray(candidates2[0].content.parts)) ? candidates2[0].content.parts : [];
+                                for (const p of parts2) { if (typeof p.text === 'string') retryText += p.text; }
+                            }
+                            let retryBlock = extractCodeBlock(retryText) || retryText || '';
+                            if (retryBlock && retryBlock.trim().length > 0) {
+                                block = retryBlock;
+                            }
+                        }
+                    } catch (e2) {
+                        console.warn('Retry failed', e2);
+                    }
+                }
+                // Guard: never overwrite the file with an empty response
+                if (!block || block.trim().length === 0) {
+                    addAiMessage(`<div class='text-warning text-sm'>AI returned empty content twice. Saving ORIGINAL content to keep your file intact.</div>`, 'assistant');
+                    block = content; // fall back to original file content
+                }
+                // Write the response to the currently open file
                 document.getElementById('editor').value = block;
                 debouncedUpdate();
                 await saveFile();
@@ -760,9 +830,257 @@
                 const st = fileState[currentFile] || (fileState[currentFile] = { dirty: true, lastSaved: '', buffer: '' });
                 st.buffer = document.getElementById('editor').value;
             }
+            // If find panel is open, recompute matches on content change
+            const fp = document.getElementById('find-panel');
+            if (fp && !fp.classList.contains('hidden')) {
+                const q = (document.getElementById('find-input')?.value || '').trim();
+                if (q) computeFindMatches(q);
+            }
             debouncedUpdate();
         }
         document.getElementById('editor').addEventListener('input', onEditorInput);
+
+        // ===== Find feature (simple literal match, case-sensitive) =====
+        let findState = { query: '', matches: [], current: -1 };
+
+        function isEditorVisible() {
+            const ed = document.getElementById('editor');
+            return ed && !ed.classList.contains('hidden');
+        }
+
+        function openFind() {
+            if (!isEditorVisible()) { toast('Find works only for text files.'); return; }
+            const panel = document.getElementById('find-panel');
+            const input = document.getElementById('find-input');
+            panel.classList.remove('hidden');
+            // Pre-fill with current selection if any
+            const ed = document.getElementById('editor');
+            const sel = ed.value.substring(ed.selectionStart, ed.selectionEnd);
+            if (sel && sel.indexOf('\n') === -1) {
+                input.value = sel;
+            }
+            input.focus();
+            input.select();
+            const q = (input.value || '').trim();
+            if (q) {
+                computeFindMatches(q);
+                // If no current selection within matches, jump to first
+                if (findState.matches.length) {
+                    findState.current = 0;
+                    goToMatchAtIndex(findState.current);
+                } else {
+                    updateFindCount();
+                }
+            } else {
+                findState = { query: '', matches: [], current: -1 };
+                updateFindCount();
+            }
+        }
+
+        function closeFind() {
+            const panel = document.getElementById('find-panel');
+            if (panel) panel.classList.add('hidden');
+        }
+
+        function computeFindMatches(query) {
+            if (!isEditorVisible()) { findState = { query: '', matches: [], current: -1 }; updateFindCount(); return; }
+            const text = document.getElementById('editor').value;
+            const q = String(query || '');
+            const matches = [];
+            if (q.length > 0) {
+                let idx = 0;
+                while (true) {
+                    const pos = text.indexOf(q, idx);
+                    if (pos === -1) break;
+                    matches.push(pos);
+                    idx = pos + (q.length || 1);
+                }
+            }
+            // Try to keep current near same character if possible
+            let cur = -1;
+            if (matches.length > 0) {
+                const ed = document.getElementById('editor');
+                const caret = ed.selectionStart;
+                // Choose the first match whose start >= caret; else wrap to 0
+                cur = matches.findIndex(m => m >= caret);
+                if (cur === -1) cur = 0;
+            }
+            findState = { query: q, matches, current: cur };
+            updateFindCount();
+        }
+
+        function updateFindCount() {
+            const el = document.getElementById('find-count');
+            if (!el) return;
+            const total = findState.matches.length;
+            const cur = total > 0 && findState.current >= 0 ? (findState.current + 1) : 0;
+            el.textContent = `${cur}/${total}`;
+        }
+
+        function goToMatchAtIndex(i) {
+            if (!isEditorVisible()) return;
+            const ed = document.getElementById('editor');
+            const q = findState.query;
+            const start = findState.matches[i];
+            if (typeof start !== 'number') { updateFindCount(); return; }
+            const end = start + q.length;
+            ed.focus();
+            if (typeof ed.setSelectionRange === 'function') {
+                ed.setSelectionRange(start, end);
+            } else {
+                ed.selectionStart = start; ed.selectionEnd = end;
+            }
+            // Attempt to bring selection into view
+            ed.scrollTop = ed.scrollHeight; // push to bottom
+            const before = ed.value.slice(0, start);
+            const lines = before.split('\n');
+            // heuristic scroll by line count
+            ed.scrollTop = Math.max(0, (lines.length - 5) * 18);
+            updateFindCount();
+        }
+
+        function findNext() {
+            if (!findState.query) {
+                const q = (document.getElementById('find-input')?.value || '').trim();
+                if (!q) return;
+                computeFindMatches(q);
+            }
+            const total = findState.matches.length;
+            if (!total) { updateFindCount(); return; }
+            findState.current = (findState.current + 1 + total) % total;
+            goToMatchAtIndex(findState.current);
+        }
+
+        function findPrev() {
+            if (!findState.query) {
+                const q = (document.getElementById('find-input')?.value || '').trim();
+                if (!q) return;
+                computeFindMatches(q);
+            }
+            const total = findState.matches.length;
+            if (!total) { updateFindCount(); return; }
+            findState.current = (findState.current - 1 + total) % total;
+            goToMatchAtIndex(findState.current);
+        }
+
+        // Bind Cmd/Ctrl+F to open find. If the panel is already open, toggle focus between inputs (find <-> replace)
+        function handleFindShortcut(e) {
+            const isFind = (e.metaKey || e.ctrlKey) && e.key && e.key.toLowerCase() === 'f';
+            if (!isFind) return;
+            e.preventDefault();
+            e.stopPropagation();
+            const panel = document.getElementById('find-panel');
+            if (panel && !panel.classList.contains('hidden')) {
+                const fin = document.getElementById('find-input');
+                const rin = document.getElementById('replace-input');
+                // Toggle focus between find and replace inputs
+                if (document.activeElement === fin && rin) { rin.focus(); rin.select(); }
+                else if (fin) { fin.focus(); fin.select(); }
+                else if (rin) { rin.focus(); rin.select(); }
+                return;
+            }
+            openFind();
+        }
+        window.addEventListener('keydown', handleFindShortcut, { capture: true });
+        document.addEventListener('keydown', handleFindShortcut, { capture: true });
+        document.body.addEventListener('keydown', handleFindShortcut, { capture: true });
+
+        // ===== Replace feature =====
+        function openReplace() {
+            // Ensure find panel is open
+            openFind();
+            const r = document.getElementById('replace-input');
+            if (r) { r.focus(); r.select(); }
+        }
+
+        function replaceCurrent() {
+            if (!isEditorVisible()) { toast('Replace works only for text files.'); return; }
+            const q = (document.getElementById('find-input')?.value || '').trim();
+            const r = document.getElementById('replace-input')?.value ?? '';
+            if (!q) { return; }
+            // Ensure matches are computed
+            if (findState.query !== q || !findState.matches.length) {
+                computeFindMatches(q);
+            }
+            const ed = document.getElementById('editor');
+            const total = findState.matches.length;
+            if (!total) { updateFindCount(); return; }
+            if (findState.current < 0) findState.current = 0;
+            const start = findState.matches[findState.current];
+            const end = start + q.length;
+            // Apply replacement
+            const before = ed.value.slice(0, start);
+            const after = ed.value.slice(end);
+            ed.value = before + r + after;
+            // Update state and caret to end of replacement
+            const newCaret = before.length + r.length;
+            if (typeof ed.setSelectionRange === 'function') ed.setSelectionRange(newCaret, newCaret);
+            // Propagate change to buffers/state and recompute matches relative to new caret
+            onEditorInput();
+            computeFindMatches(q);
+            // After recompute, current is set to first match >= caret. Move selection to it if exists
+            const total2 = findState.matches.length;
+            if (total2) {
+                goToMatchAtIndex(findState.current);
+            } else {
+                updateFindCount();
+            }
+        }
+
+        function replaceAll() {
+            if (!isEditorVisible()) { toast('Replace works only for text files.'); return; }
+            const q = (document.getElementById('find-input')?.value || '').trim();
+            const r = document.getElementById('replace-input')?.value ?? '';
+            if (!q) { return; }
+            const ed = document.getElementById('editor');
+            const text = ed.value;
+            // Count occurrences via matches
+            computeFindMatches(q);
+            const count = findState.matches.length;
+            if (!count) { updateFindCount(); return; }
+            ed.value = text.split(q).join(r);
+            onEditorInput();
+            computeFindMatches(q); // now likely 0 or updated if r contains q
+            updateFindCount();
+            toast(`Replaced ${count} occurrence${count === 1 ? '' : 's'}`);
+        }
+
+        // Note: No separate shortcut for replace. Use Cmd/Ctrl+F to open the panel
+        // and press Cmd/Ctrl+F again to toggle focus between Find and Replace inputs.
+
+        // Wire find input behaviors
+        (function(){
+            const input = document.getElementById('find-input');
+            if (!input) return;
+            input.addEventListener('input', () => {
+                const q = (input.value || '').trim();
+                if (q) computeFindMatches(q); else { findState = { query: '', matches: [], current: -1 }; updateFindCount(); }
+            });
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault(); e.stopPropagation();
+                    if (e.shiftKey) findPrev(); else findNext();
+                } else if (e.key === 'Escape') {
+                    e.preventDefault(); e.stopPropagation();
+                    closeFind();
+                }
+            });
+        })();
+
+        // Wire replace input behaviors
+        (function(){
+            const r = document.getElementById('replace-input');
+            if (!r) return;
+            r.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault(); e.stopPropagation();
+                    replaceCurrent();
+                } else if (e.key === 'Escape') {
+                    e.preventDefault(); e.stopPropagation();
+                    closeFind();
+                }
+            });
+        })();
 
         function toggleDir(el) {
             const ul = el.nextElementSibling;

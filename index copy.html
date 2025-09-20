@@ -656,6 +656,22 @@
             }
         }
 
+        // Trigger AI send with Cmd+Enter (Mac) or Ctrl+Enter (other)
+        (function(){
+            const aiInput = document.getElementById('ai-input');
+            if (!aiInput) return;
+            aiInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const btn = document.getElementById('ai-send-btn');
+                    if (btn && !btn.disabled) {
+                        aiSend();
+                    }
+                }
+            });
+        })();
+
         
 
         function addToOpenFiles(filename) {
