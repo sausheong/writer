@@ -142,11 +142,8 @@
                     <div class="label"><span class="label-text">Gemini model</span></div>
                     <select id="ai-model-modal" class="select select-bordered select-sm w-full">
                         <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+                        <option value="gemini-2.5-pro">gemini-2.5-pro</option>
                     </select>
-                </label>
-                <label class="cursor-pointer flex items-center gap-2 text-sm">
-                    <input id="ai-auto-apply-modal" type="checkbox" class="checkbox checkbox-xs" />
-                    <span>Auto-apply file changes</span>
                 </label>
             </div>
             <div class="modal-action">
@@ -168,10 +165,25 @@
         // Gemini API configuration
         const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
         // Model configuration
-        const ALLOWED_MODELS = ['gemini-2.5-flash'];
+        const ALLOWED_MODELS = ['gemini-2.5-flash', 'gemini-2.5-pro'];
         const DEFAULT_MODEL = 'gemini-2.5-flash';
         // Track per-file state (dirty, lastSaved, and in-memory buffer)
         const fileState = {}; // { [filename]: { dirty: boolean, lastSaved: string, buffer: string } }
+        // File preview type constants (avoid re-creating arrays repeatedly)
+        const IMAGE_EXTS = Object.freeze(['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']);
+        const PDF_EXTS = Object.freeze(['.pdf']);
+        // Precompiled regexes
+        const CODE_BLOCK_RE = /```[\s\S]*?```/g;
+        // Cache frequently-used DOM elements (static nodes)
+        const E = Object.freeze({
+            editor: document.getElementById('editor'),
+            preview: document.getElementById('preview'),
+            pdf: document.getElementById('pdf-viewer'),
+            image: document.getElementById('image-viewer'),
+            aiSpinner: document.getElementById('ai-spinner'),
+            aiSendBtn: document.getElementById('ai-send-btn'),
+            aiInput: document.getElementById('ai-input'),
+        });
 
         /*
          Sections overview (logical modules):
@@ -228,10 +240,8 @@
                 const fileHandle = await getFileHandle(filename);
                 const file = await fileHandle.getFile();
                 const ext = filename.substring(filename.lastIndexOf('.')).toLowerCase();
-                const imageExts = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'];
-                const pdfExts = ['.pdf'];
                 currentFile = filename;
-                if (imageExts.includes(ext)) {
+                if (IMAGE_EXTS.includes(ext)) {
                     if (currentBlobUrl) { URL.revokeObjectURL(currentBlobUrl); currentBlobUrl = null; }
                     document.getElementById('editor').classList.add('hidden');
                     document.getElementById('pdf-viewer').classList.add('hidden');
@@ -241,7 +251,7 @@
                     img.src = currentBlobUrl;
                     img.classList.remove('hidden');
                     document.getElementById('download-btn').classList.remove('hidden');
-                } else if (pdfExts.includes(ext)) {
+                } else if (PDF_EXTS.includes(ext)) {
                     if (currentBlobUrl) { URL.revokeObjectURL(currentBlobUrl); currentBlobUrl = null; }
                     document.getElementById('editor').classList.add('hidden');
                     document.getElementById('image-viewer').classList.add('hidden');
@@ -285,8 +295,8 @@
         }
 
         function updateWordCount() {
-            if (!document.getElementById('editor').classList.contains('hidden')) {
-                const text = document.getElementById('editor').value;
+            if (!E.editor.classList.contains('hidden')) {
+                const text = E.editor.value;
                 const words = text.trim().split(/\s+/).filter(word => word.length > 0);
                 document.getElementById('word-count').textContent = 'Word count: ' + words.length;
             } else {
@@ -295,18 +305,18 @@
         }
 
         function updatePreview() {
-            if (!document.getElementById('editor').classList.contains('hidden') && currentFile) {
-                const content = document.getElementById('editor').value;
+            if (!E.editor.classList.contains('hidden') && currentFile) {
+                const content = E.editor.value;
                 if (currentFile.endsWith('.md')) {
                     let toRender = content;
                     if (toRender.length > MAX_PREVIEW_BYTES) {
                         toRender = toRender.slice(0, MAX_PREVIEW_BYTES);
-                        const html = `<div class=\"text-sm text-gray-500\">Preview truncated for performance.</div>` + marked.parse(toRender);
-                        document.getElementById('preview').innerHTML = html;
+                        const html = `<div class="text-sm text-gray-500">Preview truncated for performance.</div>` + marked.parse(toRender);
+                        E.preview.innerHTML = html;
                         renderPreviewToWindow(html);
                     } else {
                         const html = marked.parse(toRender);
-                        document.getElementById('preview').innerHTML = html;
+                        E.preview.innerHTML = html;
                         renderPreviewToWindow(html);
                     }
                 } else {
@@ -317,11 +327,11 @@
                         truncatedNotice = '<div class="text-sm text-gray-500">Preview truncated for performance.</div>';
                     }
                     const html = truncatedNotice + '<pre>' + toRender.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</pre>';
-                    document.getElementById('preview').innerHTML = html;
+                    E.preview.innerHTML = html;
                     renderPreviewToWindow(html);
                 }
             } else {
-                const prev = document.getElementById('preview');
+                const prev = E.preview;
                 if (prev) prev.innerHTML = '';
                 renderPreviewToWindow('');
             }
@@ -394,16 +404,12 @@
             // Prefill from settings.json
             const s = await readSettings();
             const modalModel = document.getElementById('ai-model-modal');
-            const modalAuto = document.getElementById('ai-auto-apply-modal');
-            const modalStream = document.getElementById('ai-stream-modal');
             if (modalModel && s.model) modalModel.value = s.model;
-            if (modalAuto && typeof s.autoApply === 'boolean') modalAuto.checked = s.autoApply;
             // Load API key from OPFS
             const modalKey = document.getElementById('ai-api-key-modal');
             if (modalKey) {
                 try {
                     modalKey.value = s.apiKey || '';
-                    if (modalStream && typeof s.stream === 'boolean') modalStream.checked = s.stream;
                 } catch {}
             }
             if (modal.showModal) modal.showModal();
@@ -412,21 +418,13 @@
         async function saveAiSettings() {
             const modal = document.getElementById('settings-modal');
             const modalModel = document.getElementById('ai-model-modal');
-            const modalAuto = document.getElementById('ai-auto-apply-modal');
             const modalKey = document.getElementById('ai-api-key-modal');
-            const modalStream = document.getElementById('ai-stream-modal');
-            const modelSel = document.getElementById('ai-model');
-            const autoChk = document.getElementById('ai-auto-apply');
-            if (modelSel && modalModel) modelSel.value = modalModel.value;
-            if (autoChk && modalAuto) autoChk.checked = modalAuto.checked;
             try {
                 const s = await readSettings();
                 const updated = {
                     ...s,
                     apiKey: (modalKey?.value || '').trim(),
                     model: modalModel ? modalModel.value : (s.model || ''),
-                    autoApply: modalAuto ? !!modalAuto.checked : (typeof s.autoApply === 'boolean' ? s.autoApply : true),
-                    stream: modalStream ? !!modalStream.checked : (typeof s.stream === 'boolean' ? s.stream : true)
                 };
                 await writeSettings(updated);
             } catch {}
@@ -435,14 +433,16 @@
 
         async function readOpfsFileText(filename) {
             try {
-                const fh = await opfsRoot.getFileHandle(filename);
+                // Use path-aware helper so nested files work reliably
+                const fh = await getFileHandle(filename, false, false);
                 const f = await fh.getFile();
                 return (await f.text()).trim();
             } catch { return ''; }
         }
 
         async function writeOpfsFileText(filename, text) {
-            const fh = await opfsRoot.getFileHandle(filename, { create: true });
+            // Ensure directories exist and create file if missing
+            const fh = await getFileHandle(filename, true, true);
             const w = await fh.createWritable();
             await w.write(text);
             await w.close();
@@ -509,10 +509,9 @@
             // Extract ALL triple-backtick blocks and return the longest one.
             // This avoids saving partial or empty code blocks when the model emits multiple blocks.
             if (!text) return null;
-            const regex = /```[\s\S]*?```/g;
             const blocks = [];
             let m;
-            while ((m = regex.exec(text)) !== null) {
+            while ((m = CODE_BLOCK_RE.exec(text)) !== null) {
                 blocks.push(m[0]);
             }
             if (blocks.length === 0) return null;
@@ -557,16 +556,12 @@
             const prompt = document.getElementById('ai-input').value.trim();
             if (!prompt) return;
             const content = document.getElementById('editor').value;
-            // Determine model/stream/autoApply based on settings.json (single read)
+            // Determine model based on settings.json (single read)
             let model = DEFAULT_MODEL;
-            let streamEnabled = true;
-            let autoApply = true;
             try {
                 const s = await readSettings();
                 const candidate = s.model || model;
                 model = ALLOWED_MODELS.includes(candidate) ? candidate : model;
-                if (typeof s.stream === 'boolean') streamEnabled = s.stream;
-                if (typeof s.autoApply === 'boolean') autoApply = s.autoApply;
             } catch {}
 
             addAiMessage(`<div class='text-xs text-gray-500'>You → ${currentFile}</div><div>${prompt.replace(/</g,'&lt;')}</div>`, 'user');
@@ -598,7 +593,7 @@ CRITICAL OUTPUT REQUIREMENTS:
             sendBtn.disabled = true;
             input.disabled = true;
             try {
-                const endpoint = `${GEMINI_API_BASE}/models/${encodeURIComponent(model)}:${streamEnabled ? 'streamGenerateContent' : 'generateContent'}?key=${encodeURIComponent(apiKey)}${streamEnabled ? '&alt=sse' : ''}`;
+                const endpoint = `${GEMINI_API_BASE}/models/${encodeURIComponent(model)}:streamGenerateContent?key=${encodeURIComponent(apiKey)}&alt=sse`;
                 const body = {
                     systemInstruction: { role: 'system', parts: [{ text: systemBase }] },
                     contents: [
@@ -616,51 +611,42 @@ CRITICAL OUTPUT REQUIREMENTS:
                     try { bodyText = await res.text(); } catch {}
                     throw new Error(`LLM error ${res.status}${bodyText ? ': ' + bodyText : ''}`);
                 }
-                if (!streamEnabled) {
-                    // Non-streaming: parse JSON fully (Gemini generateContent)
-                    const data = await res.json();
-                    const candidates = Array.isArray(data.candidates) ? data.candidates : [];
-                    if (candidates.length) {
-                        const parts = (candidates[0].content && Array.isArray(candidates[0].content.parts)) ? candidates[0].content.parts : [];
-                        for (const p of parts) { if (typeof p.text === 'string') fullText += p.text; }
-                    }
-                } else {
-                    if (!res.body) throw new Error('No response body for stream');
-                    const reader = res.body.getReader();
-                    const decoder = new TextDecoder('utf-8');
-                    let done = false;
-                    let buffer = '';
-                    while (!done) {
-                        const { value, done: d } = await reader.read();
-                        done = d;
-                        if (value) buffer += decoder.decode(value, { stream: true });
-                        // Process complete SSE frames separated by blank line
-                        let frameSplit;
-                        while ((frameSplit = buffer.indexOf('\n\n')) >= 0) {
-                            const frame = buffer.slice(0, frameSplit);
-                            buffer = buffer.slice(frameSplit + 2);
-                            const lines = frame.split('\n');
-                            for (const raw of lines) {
-                                const line = raw.trim();
-                                if (!line || !line.startsWith('data:')) continue;
-                                const payload = line.slice(5).trim();
-                                if (payload === '[DONE]') { done = true; break; }
-                                try {
-                                    const json = JSON.parse(payload);
-                                    // Each SSE message is a partial GenerateContentResponse
-                                    const cands = Array.isArray(json.candidates) ? json.candidates : [];
-                                    if (cands.length) {
-                                        const parts = (cands[0].content && Array.isArray(cands[0].content.parts)) ? cands[0].content.parts : [];
-                                        let delta = '';
-                                        for (const p of parts) { if (typeof p.text === 'string') delta += p.text; }
-                                        if (delta) {
-                                            fullText += delta;
-                                            streamPre.textContent = fullText;
-                                            container.scrollTop = container.scrollHeight;
-                                        }
+                // Streaming only
+                if (!res.body) throw new Error('No response body for stream');
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder('utf-8');
+                let done = false;
+                let buffer = '';
+                while (!done) {
+                    const { value, done: d } = await reader.read();
+                    done = d;
+                    if (value) buffer += decoder.decode(value, { stream: true });
+                    // Process complete SSE frames separated by blank line
+                    let frameSplit;
+                    while ((frameSplit = buffer.indexOf('\n\n')) >= 0) {
+                        const frame = buffer.slice(0, frameSplit);
+                        buffer = buffer.slice(frameSplit + 2);
+                        const lines = frame.split('\n');
+                        for (const raw of lines) {
+                            const line = raw.trim();
+                            if (!line || !line.startsWith('data:')) continue;
+                            const payload = line.slice(5).trim();
+                            if (payload === '[DONE]') { done = true; break; }
+                            try {
+                                const json = JSON.parse(payload);
+                                // Each SSE message is a partial GenerateContentResponse
+                                const cands = Array.isArray(json.candidates) ? json.candidates : [];
+                                if (cands.length) {
+                                    const parts = (cands[0].content && Array.isArray(cands[0].content.parts)) ? cands[0].content.parts : [];
+                                    let delta = '';
+                                    for (const p of parts) { if (typeof p.text === 'string') delta += p.text; }
+                                    if (delta) {
+                                        fullText += delta;
+                                        streamPre.textContent = fullText;
+                                        container.scrollTop = container.scrollHeight;
                                     }
-                                } catch {}
-                            }
+                                }
+                            } catch {}
                         }
                     }
                 }
@@ -669,40 +655,7 @@ CRITICAL OUTPUT REQUIREMENTS:
                 if (block == null) {
                     block = fullText || '';
                 }
-                // If empty, auto-retry once with stricter non-streaming request
-                if (!block || block.trim().length === 0) {
-                    try {
-                        const strictSystem = systemBase + `\n\nSTRICT MODE: You MUST output a single fenced code block containing the FULL file content. If you cannot produce changes, output the ORIGINAL content. Do not include any explanations.`;
-                        const retryEndpoint = `${GEMINI_API_BASE}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
-                        const retryBody = {
-                            systemInstruction: { role: 'system', parts: [{ text: strictSystem }] },
-                            contents: [
-                                { role: 'user', parts: [{ text: userMsgBase(currentFile, content, prompt) }] }
-                            ],
-                            generationConfig: { temperature: 0.2 }
-                        };
-                        const retryRes = await fetch(retryEndpoint, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(retryBody)
-                        });
-                        if (retryRes.ok) {
-                            const data2 = await retryRes.json();
-                            let retryText = '';
-                            const candidates2 = Array.isArray(data2.candidates) ? data2.candidates : [];
-                            if (candidates2.length) {
-                                const parts2 = (candidates2[0].content && Array.isArray(candidates2[0].content.parts)) ? candidates2[0].content.parts : [];
-                                for (const p of parts2) { if (typeof p.text === 'string') retryText += p.text; }
-                            }
-                            let retryBlock = extractCodeBlock(retryText) || retryText || '';
-                            if (retryBlock && retryBlock.trim().length > 0) {
-                                block = retryBlock;
-                            }
-                        }
-                    } catch (e2) {
-                        console.warn('Retry failed', e2);
-                    }
-                }
+                // No non-streaming retry; rely on guard below
                 // Guard: never overwrite the file with an empty response
                 if (!block || block.trim().length === 0) {
                     addAiMessage(`<div class='text-warning text-sm'>AI returned empty content twice. Saving ORIGINAL content to keep your file intact.</div>`, 'assistant');
@@ -725,6 +678,22 @@ CRITICAL OUTPUT REQUIREMENTS:
                 input.disabled = false;
             }
         }
+
+        // Trigger AI send with Cmd+Enter (Mac) or Ctrl+Enter (others)
+        (function(){
+            const aiInput = document.getElementById('ai-input');
+            if (!aiInput) return;
+            aiInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const btn = document.getElementById('ai-send-btn');
+                    if (btn && !btn.disabled) {
+                        aiSend();
+                    }
+                }
+            });
+        })();
 
         
 
@@ -986,12 +955,6 @@ CRITICAL OUTPUT REQUIREMENTS:
         document.body.addEventListener('keydown', handleFindShortcut, { capture: true });
 
         // ===== Replace feature =====
-        function openReplace() {
-            // Ensure find panel is open
-            openFind();
-            const r = document.getElementById('replace-input');
-            if (r) { r.focus(); r.select(); }
-        }
 
         function replaceCurrent() {
             if (!isEditorVisible()) { toast('Replace works only for text files.'); return; }
@@ -1530,63 +1493,6 @@ CRITICAL OUTPUT REQUIREMENTS:
             }
         }
 
-        // Consolidated modules map for readability and discoverability only (no behavioral change)
-        const Modules = Object.freeze({
-            OPFS: Object.freeze({
-                initOPFS,
-                getFileHandle,
-                readOpfsFileText,
-                writeOpfsFileText,
-                readSettings,
-                writeSettings,
-                getApiKey,
-                loadSettingsIntoUI,
-                buildTreeFromOPFS,
-                buildTree,
-                copyWithinOPFSDirectory,
-                copyDirectoryToOPFS,
-                getDirectoryHandleByPath,
-                splitParent,
-            }),
-            UI: Object.freeze({
-                debounce,
-                updateWordCount,
-                updatePreview,
-                popoutPreview,
-                renderPreviewToWindow,
-                toast,
-                downloadContentAs,
-                addToOpenFiles,
-                highlightActiveTab,
-                setDirty,
-                updateTabVisual,
-                closeTab,
-                toggleDir,
-                toggleLeft,
-                toggleRight,
-                renderTree,
-                renderItem,
-                getExpandedPaths,
-                restoreExpandedPaths,
-                showContextMenu,
-                hideContextMenu,
-                findSpanByPath,
-                findChildUL,
-                addFolder,
-                newFile,
-                newFileInContextDir,
-                newFolderInContextDir,
-                downloadFile,
-                saveFile,
-                loadFile,
-            }),
-            AI: Object.freeze({
-                toggleAiSettings,
-                saveAiSettings,
-                aiSend,
-                extractCodeBlock,
-            }),
-        });
     </script>
   </body>
 </html>
