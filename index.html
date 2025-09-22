@@ -32,6 +32,9 @@
         #context-menu .item { padding: 8px 12px; cursor: pointer; }
         #context-menu .item:hover { background: #f3f4f6; }
 
+        /* Active file in tree */
+        .active-file { background-color: #dbeafe; /* blue-100 */ }
+
         /* Basic markdown preview typography without relying on plugins */
         #preview { line-height: 1.7; }
         #preview h1 { font-size: 2rem; font-weight: 700; margin: 1.25em 0 0.6em; }
@@ -66,7 +69,7 @@
     <div class="flex flex-1 overflow-hidden">
         <div class="w-1/5 bg-gray-100 p-4 overflow-y-auto" id="left-panel">
             <div class="flex items-center gap-2 mb-4">
-                <button type="button" onclick="addFolder()" class="btn btn-sm btn-accent">add</button>
+                <button type="button" onclick="addFolder()" class="btn btn-sm btn-accent">load</button>
                 <button type="button" onclick="newFile()" class="btn btn-sm btn-primary">new</button>
             </div>
             <h4 class="text-md font-semibold">Files</h4>
@@ -103,13 +106,17 @@
             <div id="ai-spinner" class="loading loading-spinner loading-sm hidden mx-auto my-2"></div>
             <div class="border-t border-gray-200 p-2 space-y-2">
                 <div class="flex items-center justify-between">
-                    <span class="text-sm text-gray-600">Agent</span>
+                    <span class="text-sm text-gray-600">Writer agent</span>
                 </div>
                 
                 <div class="flex gap-2 items-start">
                     <textarea id="ai-input" placeholder="Ask the AI to modify the current file..." class="textarea textarea-bordered textarea-sm w-full" rows="3"></textarea>
-                    <button id="ai-send-btn" class="btn btn-ghost btn-sm" onclick="aiSend()">►</button>
+                    <div class="flex flex-col gap-1">
+                        <button id="ai-send-btn" class="btn btn-ghost btn-sm" onclick="aiSend()">►</button>
+                        <button id="ai-stop-btn" class="btn btn-error btn-sm hidden" onclick="stopAiSend()">⏹</button>
+                    </div>
                 </div>
+                
             </div>
         </div>
     </div>
@@ -145,6 +152,10 @@
                         <option value="gemini-2.5-pro">gemini-2.5-pro</option>
                     </select>
                 </label>
+                <label class="cursor-pointer flex items-center gap-2 text-sm">
+                    <input id="ai-auto-apply-modal" type="checkbox" class="checkbox checkbox-xs" />
+                    <span>Auto-apply file changes</span>
+                </label>
             </div>
             <div class="modal-action">
                 <button class="btn btn-ghost" onclick="document.getElementById('settings-modal').close()">Cancel</button>
@@ -162,6 +173,7 @@
         let currentBlobUrl = null; // track last created object URL to revoke
         const MAX_PREVIEW_BYTES = 500000; // ~500KB limit for preview to keep it responsive
         let previewWin = null; // external preview window reference
+        let abortController = null; // for cancelling AI requests
         // Gemini API configuration
         const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
         // Model configuration
@@ -172,18 +184,6 @@
         // File preview type constants (avoid re-creating arrays repeatedly)
         const IMAGE_EXTS = Object.freeze(['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']);
         const PDF_EXTS = Object.freeze(['.pdf']);
-        // Precompiled regexes
-        const CODE_BLOCK_RE = /```[\s\S]*?```/g;
-        // Cache frequently-used DOM elements (static nodes)
-        const E = Object.freeze({
-            editor: document.getElementById('editor'),
-            preview: document.getElementById('preview'),
-            pdf: document.getElementById('pdf-viewer'),
-            image: document.getElementById('image-viewer'),
-            aiSpinner: document.getElementById('ai-spinner'),
-            aiSendBtn: document.getElementById('ai-send-btn'),
-            aiInput: document.getElementById('ai-input'),
-        });
 
         /*
          Sections overview (logical modules):
@@ -288,15 +288,15 @@
                 debouncedUpdate();
                 addToOpenFiles(filename);
                 highlightActiveTab(filename);
-                updateTabVisual(filename);
+                highlightActiveFileInTree(filename);
             } catch (err) {
                 console.error('Error loading file:', err);
             }
         }
 
         function updateWordCount() {
-            if (!E.editor.classList.contains('hidden')) {
-                const text = E.editor.value;
+            if (!document.getElementById('editor').classList.contains('hidden')) {
+                const text = document.getElementById('editor').value;
                 const words = text.trim().split(/\s+/).filter(word => word.length > 0);
                 document.getElementById('word-count').textContent = 'Word count: ' + words.length;
             } else {
@@ -305,18 +305,18 @@
         }
 
         function updatePreview() {
-            if (!E.editor.classList.contains('hidden') && currentFile) {
-                const content = E.editor.value;
+            if (!document.getElementById('editor').classList.contains('hidden') && currentFile) {
+                const content = document.getElementById('editor').value;
                 if (currentFile.endsWith('.md')) {
                     let toRender = content;
                     if (toRender.length > MAX_PREVIEW_BYTES) {
                         toRender = toRender.slice(0, MAX_PREVIEW_BYTES);
-                        const html = `<div class="text-sm text-gray-500">Preview truncated for performance.</div>` + marked.parse(toRender);
-                        E.preview.innerHTML = html;
+                        const html = `<div class=\"text-sm text-gray-500\">Preview truncated for performance.</div>` + marked.parse(toRender);
+                        document.getElementById('preview').innerHTML = html;
                         renderPreviewToWindow(html);
                     } else {
                         const html = marked.parse(toRender);
-                        E.preview.innerHTML = html;
+                        document.getElementById('preview').innerHTML = html;
                         renderPreviewToWindow(html);
                     }
                 } else {
@@ -327,11 +327,11 @@
                         truncatedNotice = '<div class="text-sm text-gray-500">Preview truncated for performance.</div>';
                     }
                     const html = truncatedNotice + '<pre>' + toRender.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</pre>';
-                    E.preview.innerHTML = html;
+                    document.getElementById('preview').innerHTML = html;
                     renderPreviewToWindow(html);
                 }
             } else {
-                const prev = E.preview;
+                const prev = document.getElementById('preview');
                 if (prev) prev.innerHTML = '';
                 renderPreviewToWindow('');
             }
@@ -391,8 +391,7 @@
                 const target = previewWin.document.getElementById('ext-preview');
                 if (target) target.innerHTML = html || '';
             } catch (e) {
-                // In case of cross-origin issues or closed window
-                previewWin = null;
+                // Ignore cross-origin errors
             }
         }
 
@@ -404,12 +403,16 @@
             // Prefill from settings.json
             const s = await readSettings();
             const modalModel = document.getElementById('ai-model-modal');
+            const modalAuto = document.getElementById('ai-auto-apply-modal');
+            const modalStream = document.getElementById('ai-stream-modal');
             if (modalModel && s.model) modalModel.value = s.model;
+            if (modalAuto && typeof s.autoApply === 'boolean') modalAuto.checked = s.autoApply;
             // Load API key from OPFS
             const modalKey = document.getElementById('ai-api-key-modal');
             if (modalKey) {
                 try {
                     modalKey.value = s.apiKey || '';
+                    if (modalStream && typeof s.stream === 'boolean') modalStream.checked = s.stream;
                 } catch {}
             }
             if (modal.showModal) modal.showModal();
@@ -418,13 +421,21 @@
         async function saveAiSettings() {
             const modal = document.getElementById('settings-modal');
             const modalModel = document.getElementById('ai-model-modal');
+            const modalAuto = document.getElementById('ai-auto-apply-modal');
             const modalKey = document.getElementById('ai-api-key-modal');
+            const modalStream = document.getElementById('ai-stream-modal');
+            const modelSel = document.getElementById('ai-model');
+            const autoChk = document.getElementById('ai-auto-apply');
+            if (modelSel && modalModel) modelSel.value = modalModel.value;
+            if (autoChk && modalAuto) autoChk.checked = modalAuto.checked;
             try {
                 const s = await readSettings();
                 const updated = {
                     ...s,
                     apiKey: (modalKey?.value || '').trim(),
                     model: modalModel ? modalModel.value : (s.model || ''),
+                    autoApply: modalAuto ? !!modalAuto.checked : (typeof s.autoApply === 'boolean' ? s.autoApply : true),
+                    stream: modalStream ? !!modalStream.checked : (typeof s.stream === 'boolean' ? s.stream : true)
                 };
                 await writeSettings(updated);
             } catch {}
@@ -509,9 +520,10 @@
             // Extract ALL triple-backtick blocks and return the longest one.
             // This avoids saving partial or empty code blocks when the model emits multiple blocks.
             if (!text) return null;
+            const regex = /```[\s\S]*?```/g;
             const blocks = [];
             let m;
-            while ((m = CODE_BLOCK_RE.exec(text)) !== null) {
+            while ((m = regex.exec(text)) !== null) {
                 blocks.push(m[0]);
             }
             if (blocks.length === 0) return null;
@@ -556,12 +568,15 @@
             const prompt = document.getElementById('ai-input').value.trim();
             if (!prompt) return;
             const content = document.getElementById('editor').value;
-            // Determine model based on settings.json (single read)
             let model = DEFAULT_MODEL;
+            let streamEnabled = true;
+            let autoApply = true;
             try {
                 const s = await readSettings();
                 const candidate = s.model || model;
                 model = ALLOWED_MODELS.includes(candidate) ? candidate : model;
+                if (typeof s.stream === 'boolean') streamEnabled = s.stream;
+                if (typeof s.autoApply === 'boolean') autoApply = s.autoApply;
             } catch {}
 
             addAiMessage(`<div class='text-xs text-gray-500'>You → ${currentFile}</div><div>${prompt.replace(/</g,'&lt;')}</div>`, 'user');
@@ -580,20 +595,25 @@ CRITICAL OUTPUT REQUIREMENTS:
             const container = document.getElementById('ai-messages');
             const wrap = document.createElement('div');
             wrap.className = 'bg-base-100 rounded p-2 mb-2';
-            wrap.innerHTML = `<div class='text-xs text-gray-500'>Agent → ${currentFile}</div><pre class='whitespace-pre-wrap' id='ai-stream-msg'></pre>`;
+            wrap.innerHTML = `<div class='text-xs text-gray-500'>Writer → ${currentFile}</div><pre class='whitespace-pre-wrap' id='ai-stream-msg'></pre>`;
             container.appendChild(wrap);
             container.scrollTop = container.scrollHeight;
             const streamPre = wrap.querySelector('#ai-stream-msg');
 
             let fullText = '';
+            // Cache DOM elements to avoid repeated lookups
             const spinner = document.getElementById('ai-spinner');
             const sendBtn = document.getElementById('ai-send-btn');
+            const stopBtn = document.getElementById('ai-stop-btn');
             const input = document.getElementById('ai-input');
             spinner.classList.remove('hidden');
             sendBtn.disabled = true;
+            stopBtn.classList.remove('hidden');
             input.disabled = true;
+            // Create abort controller for cancellation
+            abortController = new AbortController();
             try {
-                const endpoint = `${GEMINI_API_BASE}/models/${encodeURIComponent(model)}:streamGenerateContent?key=${encodeURIComponent(apiKey)}&alt=sse`;
+                const endpoint = `${GEMINI_API_BASE}/models/${encodeURIComponent(model)}:${streamEnabled ? 'streamGenerateContent' : 'generateContent'}?key=${encodeURIComponent(apiKey)}${streamEnabled ? '&alt=sse' : ''}`;
                 const body = {
                     systemInstruction: { role: 'system', parts: [{ text: systemBase }] },
                     contents: [
@@ -604,49 +624,59 @@ CRITICAL OUTPUT REQUIREMENTS:
                 const res = await fetch(endpoint, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(body)
+                    body: JSON.stringify(body),
+                    signal: abortController.signal
                 });
                 if (!res.ok) {
                     let bodyText = '';
                     try { bodyText = await res.text(); } catch {}
                     throw new Error(`LLM error ${res.status}${bodyText ? ': ' + bodyText : ''}`);
                 }
-                // Streaming only
-                if (!res.body) throw new Error('No response body for stream');
-                const reader = res.body.getReader();
-                const decoder = new TextDecoder('utf-8');
-                let done = false;
-                let buffer = '';
-                while (!done) {
-                    const { value, done: d } = await reader.read();
-                    done = d;
-                    if (value) buffer += decoder.decode(value, { stream: true });
-                    // Process complete SSE frames separated by blank line
-                    let frameSplit;
-                    while ((frameSplit = buffer.indexOf('\n\n')) >= 0) {
-                        const frame = buffer.slice(0, frameSplit);
-                        buffer = buffer.slice(frameSplit + 2);
-                        const lines = frame.split('\n');
-                        for (const raw of lines) {
-                            const line = raw.trim();
-                            if (!line || !line.startsWith('data:')) continue;
-                            const payload = line.slice(5).trim();
-                            if (payload === '[DONE]') { done = true; break; }
-                            try {
-                                const json = JSON.parse(payload);
-                                // Each SSE message is a partial GenerateContentResponse
-                                const cands = Array.isArray(json.candidates) ? json.candidates : [];
-                                if (cands.length) {
-                                    const parts = (cands[0].content && Array.isArray(cands[0].content.parts)) ? cands[0].content.parts : [];
-                                    let delta = '';
-                                    for (const p of parts) { if (typeof p.text === 'string') delta += p.text; }
-                                    if (delta) {
-                                        fullText += delta;
-                                        streamPre.textContent = fullText;
-                                        container.scrollTop = container.scrollHeight;
+                if (!streamEnabled) {
+                    // Non-streaming: parse JSON fully (Gemini generateContent)
+                    const data = await res.json();
+                    const candidates = Array.isArray(data.candidates) ? data.candidates : [];
+                    if (candidates.length) {
+                        const parts = (candidates[0].content && Array.isArray(candidates[0].content.parts)) ? candidates[0].content.parts : [];
+                        for (const p of parts) { if (typeof p.text === 'string') fullText += p.text; }
+                    }
+                } else {
+                    if (!res.body) throw new Error('No response body for stream');
+                    const reader = res.body.getReader();
+                    const decoder = new TextDecoder('utf-8');
+                    let done = false;
+                    let buffer = '';
+                    while (!done) {
+                        const { value, done: d } = await reader.read();
+                        done = d;
+                        if (value) buffer += decoder.decode(value, { stream: true });
+                        // Process complete SSE frames separated by blank line
+                        let frameSplit;
+                        while ((frameSplit = buffer.indexOf('\n\n')) >= 0) {
+                            const frame = buffer.slice(0, frameSplit);
+                            buffer = buffer.slice(frameSplit + 2);
+                            const lines = frame.split('\n');
+                            for (const raw of lines) {
+                                const line = raw.trim();
+                                if (!line || !line.startsWith('data:')) continue;
+                                const payload = line.slice(5).trim();
+                                if (payload === '[DONE]') { done = true; break; }
+                                try {
+                                    const json = JSON.parse(payload);
+                                    // Each SSE message is a partial GenerateContentResponse
+                                    const cands = Array.isArray(json.candidates) ? json.candidates : [];
+                                    if (cands.length) {
+                                        const parts = (cands[0].content && Array.isArray(cands[0].content.parts)) ? cands[0].content.parts : [];
+                                        let delta = '';
+                                        for (const p of parts) { if (typeof p.text === 'string') delta += p.text; }
+                                        if (delta) {
+                                            fullText += delta;
+                                            streamPre.textContent = fullText;
+                                            container.scrollTop = container.scrollHeight;
+                                        }
                                     }
-                                }
-                            } catch {}
+                                } catch {}
+                            }
                         }
                     }
                 }
@@ -655,27 +685,81 @@ CRITICAL OUTPUT REQUIREMENTS:
                 if (block == null) {
                     block = fullText || '';
                 }
-                // No non-streaming retry; rely on guard below
+                // If empty, auto-retry once with stricter non-streaming request
+                if (!block || block.trim().length === 0) {
+                    try {
+                        const strictSystem = systemBase + `\n\nSTRICT MODE: You MUST output a single fenced code block containing the FULL file content. If you cannot produce changes, output the ORIGINAL content. Do not include any explanations.`;
+                        const retryEndpoint = `${GEMINI_API_BASE}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+                        const retryBody = {
+                            systemInstruction: { role: 'system', parts: [{ text: strictSystem }] },
+                            contents: [
+                                { role: 'user', parts: [{ text: userMsgBase(currentFile, content, prompt) }] }
+                            ],
+                            generationConfig: { temperature: 0.2 }
+                        };
+                        const retryRes = await fetch(retryEndpoint, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(retryBody)
+                        });
+                        if (retryRes.ok) {
+                            const data2 = await retryRes.json();
+                            let retryText = '';
+                            const candidates2 = Array.isArray(data2.candidates) ? data2.candidates : [];
+                            if (candidates2.length) {
+                                const parts2 = (candidates2[0].content && Array.isArray(candidates2[0].content.parts)) ? candidates2[0].content.parts : [];
+                                for (const p of parts2) { if (typeof p.text === 'string') retryText += p.text; }
+                            }
+                            let retryBlock = extractCodeBlock(retryText) || retryText || '';
+                            if (retryBlock && retryBlock.trim().length > 0) {
+                                block = retryBlock;
+                            }
+                        }
+                    } catch (e2) {
+                        console.warn('Retry failed', e2);
+                    }
+                }
                 // Guard: never overwrite the file with an empty response
                 if (!block || block.trim().length === 0) {
-                    addAiMessage(`<div class='text-warning text-sm'>AI returned empty content twice. Saving ORIGINAL content to keep your file intact.</div>`, 'assistant');
-                    block = content; // fall back to original file content
+                    if (autoApply) {
+                        addAiMessage(`<div class='text-warning text-sm'>AI returned empty content twice. Saving ORIGINAL content to keep your file intact.</div>`, 'assistant');
+                        block = content; // fall back to original file content
+                    } else {
+                        addAiMessage(`<div class='text-warning text-sm'>AI returned empty content. No changes applied to file.</div>`, 'assistant');
+                        return;
+                    }
                 }
-                // Write the response to the currently open file
-                document.getElementById('editor').value = block;
-                debouncedUpdate();
-                await saveFile();
-                addAiMessage(`<div class='text-xs text-gray-500'>Saved to ${currentFile}</div>`, 'assistant');
+                // Apply changes only if autoApply is enabled
+                if (autoApply) {
+                    // Write the response to the currently open file
+                    document.getElementById('editor').value = block;
+                    debouncedUpdate();
+                    await saveFile();
+                    addAiMessage(`<div class='text-xs text-gray-500'>Saved to ${currentFile}</div>`, 'assistant');
+                } else {
+                    // Show response in panel without applying to file
+                    addAiMessage(`<div class='text-xs text-gray-500'>Response received. Enable auto-apply in settings to apply changes automatically.</div><pre class='whitespace-pre-wrap bg-gray-100 p-2 rounded text-sm'>${block.replace(/</g, '&lt;')}</pre>`, 'assistant');
+                }
             } catch (e) {
-                console.error(e);
-                addAiMessage(`<div class='text-error text-sm'>${String(e)}</div>`, 'assistant');
+                if (e.name === 'AbortError') {
+                    addAiMessage(`<div class='text-warning text-sm'>AI request cancelled.</div>`, 'assistant');
+                } else {
+                    console.error(e);
+                    addAiMessage(`<div class='text-error text-sm'>${String(e)}</div>`, 'assistant');
+                }
             } finally {
-                const spinner = document.getElementById('ai-spinner');
-                const sendBtn = document.getElementById('ai-send-btn');
-                const input = document.getElementById('ai-input');
                 spinner.classList.add('hidden');
                 sendBtn.disabled = false;
+                stopBtn.classList.add('hidden');
                 input.disabled = false;
+                abortController = null;
+            }
+        }
+
+        function stopAiSend() {
+            if (abortController) {
+                abortController.abort();
+                addAiMessage(`<div class='text-warning text-sm'>AI request stopped by user.</div>`, 'assistant');
             }
         }
 
@@ -733,6 +817,17 @@ CRITICAL OUTPUT REQUIREMENTS:
             });
         }
 
+        function highlightActiveFileInTree(filename) {
+            // Remove active class from all file spans
+            const allSpans = document.querySelectorAll('#left-panel [data-path]');
+            allSpans.forEach(span => span.classList.remove('active-file'));
+            // Add to the selected file if it exists
+            if (filename) {
+                const activeSpan = findSpanByPath(filename);
+                if (activeSpan) activeSpan.classList.add('active-file');
+            }
+        }
+
         function setDirty(filename, isDirty) {
             if (!filename) return;
             fileState[filename] = fileState[filename] || { dirty: false, lastSaved: '' };
@@ -786,6 +881,7 @@ CRITICAL OUTPUT REQUIREMENTS:
                         document.getElementById('preview').innerHTML = '';
                         document.getElementById('word-count').textContent = 'Word count: N/A';
                         highlightActiveTab('');
+                        highlightActiveFileInTree('');
                     }
                 }
             }
@@ -955,6 +1051,12 @@ CRITICAL OUTPUT REQUIREMENTS:
         document.body.addEventListener('keydown', handleFindShortcut, { capture: true });
 
         // ===== Replace feature =====
+        function openReplace() {
+            // Ensure find panel is open
+            openFind();
+            const r = document.getElementById('replace-input');
+            if (r) { r.focus(); r.select(); }
+        }
 
         function replaceCurrent() {
             if (!isEditorVisible()) { toast('Replace works only for text files.'); return; }
@@ -1073,6 +1175,7 @@ CRITICAL OUTPUT REQUIREMENTS:
                 await writable.write('');
                 await writable.close();
                 await buildTreeFromOPFS();
+                await loadFile(filename);
             } catch (err) {
                 console.error('Error creating new file:', err);
                 alert('Failed to create new file');
@@ -1187,6 +1290,7 @@ CRITICAL OUTPUT REQUIREMENTS:
                     restoreExpandedPaths(expandedBefore);
                 }
                 highlightActiveTab(currentFile);
+                highlightActiveFileInTree(currentFile);
                 toast(`Saved: ${currentFile}`);
             } catch (err) {
                 console.error('Error saving file:', err);
@@ -1468,6 +1572,7 @@ CRITICAL OUTPUT REQUIREMENTS:
                     const item = { isDir: false, name: filename, path: (contextMenuPath ? contextMenuPath + '/' : '') + filename };
                     childUL.insertAdjacentHTML('beforeend', renderItem(item));
                 }
+                await loadFile((contextMenuPath ? contextMenuPath + '/' : '') + filename);
             } catch (err) {
                 console.error('Error creating file:', err);
                 alert('Failed to create file');
