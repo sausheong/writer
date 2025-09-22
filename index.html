@@ -583,14 +583,51 @@
             addAiMessage(`<div class='text-xs text-gray-500'>You → ${currentFile}</div><div>${prompt.replace(/</g,'&lt;')}</div>`, 'user');
             document.getElementById('ai-input').value = '';
 
-            const systemBase = `You are a meticulous text editing and writing assistant.
-You will be given the current file path and its entire content.
+            const systemBase = `You are a meticulous text editing and writing assistant with access to all files in the workspace.
+You will be given the current file path and its entire content, along with a list of all other files and their contents.
 CRITICAL OUTPUT REQUIREMENTS:
 1) Always respond with a SINGLE fenced Markdown code block (triple backticks).
 2) That block MUST contain ONLY the FULL updated file content, with no commentary before or after.
 3) If no change is needed or you are unsure, return the ORIGINAL content in the code block.
 4) Never output an empty code block.`;
-            const userMsgBase = (filePath, fileContent, task) => `File: ${filePath}\n\n--- BEGIN FILE CONTENT ---\n${fileContent}\n--- END FILE CONTENT ---\n\nTask: ${task}\n\nReturn only the updated file content in a single fenced code block.`;
+            const userMsgBase = async (filePath, fileContent, task) => {
+                let msg = `File: ${filePath}\n\n--- BEGIN CURRENT FILE CONTENT ---\n${fileContent}\n--- END CURRENT FILE CONTENT ---\n\nTask: ${task}\n\n`;
+                // List all files in the workspace
+                const tree = await buildTree(opfsRoot);
+                const allFiles = [];
+                const collectFiles = (items, path = '') => {
+                    for (const item of items) {
+                        const fullPath = path ? `${path}/${item.name}` : item.name;
+                        if (item.isDir) {
+                            collectFiles(item.children, fullPath);
+                        } else {
+                            allFiles.push(fullPath);
+                        }
+                    }
+                };
+                collectFiles(tree);
+                msg += `Available files in workspace: ${allFiles.join(', ')}\n\n`;
+                // Include content of specific files mentioned in the task
+                const fileRegex = /\b([a-zA-Z0-9_\-\/\.]+(?:\.[a-zA-Z0-9]+)?)\b/g;
+                const mentionedFiles = new Set();
+                let match;
+                while ((match = fileRegex.exec(task)) !== null) {
+                    const potentialFile = match[1];
+                    if (allFiles.includes(potentialFile) && potentialFile !== filePath) {
+                        mentionedFiles.add(potentialFile);
+                    }
+                }
+                for (const fp of mentionedFiles) {
+                    try {
+                        const content = await readOpfsFileText(fp);
+                        msg += `--- BEGIN FILE: ${fp} ---\n${content}\n--- END FILE: ${fp} ---\n\n`;
+                    } catch (e) {
+                        console.warn('Could not read mentioned file for AI:', fp, e);
+                    }
+                }
+                msg += 'Return only the updated current file content in a single fenced code block.';
+                return msg;
+            };
 
             // Create a streaming assistant message container
             const container = document.getElementById('ai-messages');
@@ -618,7 +655,7 @@ CRITICAL OUTPUT REQUIREMENTS:
                 const body = {
                     systemInstruction: { role: 'system', parts: [{ text: systemBase }] },
                     contents: [
-                        { role: 'user', parts: [{ text: userMsgBase(currentFile, content, prompt) }] }
+                        { role: 'user', parts: [{ text: await userMsgBase(currentFile, content, prompt) }] }
                     ],
                     generationConfig: { temperature: 0.3 }
                 };
@@ -694,7 +731,7 @@ CRITICAL OUTPUT REQUIREMENTS:
                         const retryBody = {
                             systemInstruction: { role: 'system', parts: [{ text: strictSystem }] },
                             contents: [
-                                { role: 'user', parts: [{ text: userMsgBase(currentFile, content, prompt) }] }
+                                { role: 'user', parts: [{ text: await userMsgBase(currentFile, content, prompt) }] }
                             ],
                             generationConfig: { temperature: 0.2 }
                         };
